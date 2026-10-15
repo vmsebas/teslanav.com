@@ -224,9 +224,39 @@ Lo que ya funciona en producción en el ecosistema:
 - Satélite: ArcGIS World Imagery (teslanav.com relanzado).
 - Rutas: el relanzamiento no tiene navegación; codriver y "Radar" siguen pagando Mapbox Directions. Alternativas: Valhalla/OSRM/GraphHopper autoalojados o APIs con capa gratuita.
 
-**[pendiente]** Tabla de precios y límites (OpenFreeMap, MapTiler, Mapbox 2026, TomTom/HERE/ORS routing, geocoding) y dos arquitecturas con coste mensual estimado para 20.000 usuarios.
+### 6.1 Por qué Mapbox costaba 1.500 USD/mes
 
-Impacto en este repo: `components/Map.tsx` usa `setTerrain` con `mapbox-terrain-dem-v1`, `fill-extrusion` de edificios, `mapbox-traffic-v1` y estilos `mapbox://`. Migrar a MapLibre es directo para el mapa 2D; el terreno 3D y el tráfico necesitan fuentes alternativas o desaparecen (el relanzamiento los quitó).
+Precios Mapbox 2026 (mapbox.com/pricing): *map loads* web 50.000 gratis y luego 5 → 4 → 3 USD por 1.000; Directions y Map Matching 100.000 gratis y luego 2 → 1,6 USD por 1.000. Con 20.000 usuarios y ~10 sesiones por usuario salen 200-240k *map loads* (650-770 USD) y, con reruteo a 50 m, 500-600k peticiones de Directions (800-960 USD): 1.450-1.730 USD/mes. El coste no eran los tiles, así que el proxy de tiles en Vercel Blob no lo arreglaba (y Blob cobra egress: ~1 TB/mes de tiles costaría 50-60 USD).
+
+### 6.2 Piezas gratuitas o baratas que ya funcionan (precios leídos el 15-oct-2026)
+
+| Pieza | Opción | Coste | Notas |
+|---|---|---|---|
+| Renderizado | MapLibre GL JS 6.x (v6.14.0, 11-oct-2026) | 0 | v6 exige **WebGL2** y es ESM-only; si el MCU Intel no lo soporta, fijar 5.x. |
+| Tiles base | OpenFreeMap (estilos liberty, bright, positron, dark, fiord) | 0 (donación recomendada) | Sin límites ni clave, uso comercial permitido, sin SLA; planeta regenerado semanalmente. Es lo que usa teslanav.com relanzado. |
+| Tiles base (plan B) | Extracto Iberia en PMTiles (Protomaps) en Cloudflare R2 + Worker | ~14 USD/mes a 24M tiles | Egress gratis en R2; lo que usa codriver. |
+| Terreno 3D | Mapterhorn (tiles Terrarium, también PMTiles) | 0 | Sustituye a `mapbox-terrain-dem-v1`. |
+| Edificios 3D | Capa `building` de OpenMapTiles | 0 | Atributos `render_height`/`render_min_height` (no `height`/`min_height`). |
+| Tráfico en mapa | TomTom Traffic Flow vector tiles | 200.000 tiles/mes gratis; ~0,08 USD/1.000 después | No hay equivalente libre de `mapbox-traffic-v1`. Limitar a zoom ≥ 12 y viewport. |
+| Satélite | ArcGIS Location Platform con API key | 2M tiles/mes gratis; 0,15 USD/1.000 después | El endpoint crudo de World Imagery sin clave (lo que usa teslanav.com relanzado) está fuera de los términos de Esri para uso comercial. |
+| Routing sin tráfico | Valhalla autoalojado con extracto Iberia (Geofabrik) | VPS Hetzner CPX42 (8 vCPU/16 GB) ≈ 70 €/mes | Europa entera: 32-64 GB RAM (130-280 €/mes). Rebuild semanal. |
+| Routing con tráfico | TomTom Routing | 20.000 rutas/mes gratis; ~0,75 USD/1.000 después (cifra de terceros) | Google Routes con tráfico: 5.000 gratis, 10 USD/1.000. HERE exige tarjeta. |
+| Routing APIs gratis | openrouteservice (~2.000/día), Geoapify (3.000 créditos/día, comercial), LocationIQ Directions (5.000/día) | 0 | Sin tráfico en vivo. GraphHopper free solo no comercial. |
+| Geocoding | Photon autoalojado (dumps `es` 2 GB + `pt` 431 MB) | en el mismo VPS | Autocompletado sin límite. Nominatim público prohíbe autocompletado. LocationIQ 5.000/día y Geoapify 3.000/día como alternativas comerciales gratis. |
+
+### 6.3 Dos arquitecturas (20.000 usuarios/mes; supuestos: 8 sesiones/usuario, 150 tiles/sesión, 2 rutas/sesión)
+
+- **(a) Todo autoalojado, sin tráfico en vivo:** MapLibre + OpenFreeMap (o PMTiles en R2) + Mapterhorn + ArcGIS dentro de cuota + Valhalla y Photon en un VPS + Vercel Pro + Upstash ≈ **95-170 USD/mes**. Versión hobby (< 2.000 usuarios) ≈ **40 USD/mes** o menos.
+- **(b) Mezcla con APIs gratuitas y tráfico real vía TomTom:** igual mapa + TomTom para ruta inicial/ETA (y Valhalla para reruteos) + capa de tráfico acotada + geocoding gratuito ≈ **160-500 USD/mes**. Versión hobby: **0-20 USD/mes**, todo dentro de las cuotas gratuitas.
+- Recomendación: (a) más TomTom solo para la ruta inicial y el ETA (≈ +100 USD/mes a 20k usuarios, 0 en hobby). No hay fuente abierta de velocidades de tráfico para España/Portugal (el NAP de la DGT publica incidencias DATEX II CC-BY, no flujo).
+
+### 6.4 Impacto en este repo (`components/Map.tsx`, `app/api/directions`)
+
+- Sustituir `mapbox://styles/...` por los estilos de OpenFreeMap; `setTerrain` sigue igual cambiando la fuente `raster-dem` a Mapterhorn (`encoding: "terrarium"`); `setFog` → `setSky`; la capa `fill-extrusion` pasa a `render_height`/`render_min_height`; `mapbox-traffic-v1` se sustituye por TomTom o se elimina; los ids de capa usados por `hidePlaceLabels` cambian (`place_*`, `highway_*`); clases CSS `maplibregl-`.
+- Eliminar el proxy `/api/tiles` y el service worker de tiles de Mapbox (ya no aportan ahorro).
+- `/api/directions`: pasar a Valhalla o TomTom; reducir el reruteo (hoy a 50 m con 5 s de espera) para no disparar el número de peticiones.
+- Revisar si los términos de Mapbox permiten usar su Directions sobre un mapa que no es de Mapbox antes de mantenerlo como opción.
+- Fuentes: mapbox.com/pricing; openfreemap.org y su ToS (14-oct-2026); github.com/maplibre/maplibre-gl-js/releases; docs.protomaps.com/deploy/cost; mapterhorn.com/data-access; docs.tomtom.com/pricing; developers.google.com/maps/billing-and-pricing; locationiq.com/pricing; geoapify.com/pricing; github.com/komoot/photon; valhalla.github.io; location.arcgis.com/pricing; developers.cloudflare.com/r2/pricing.
 
 ---
 
