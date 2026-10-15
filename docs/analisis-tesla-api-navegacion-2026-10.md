@@ -131,7 +131,21 @@ Comandos oficiales (`POST /api/1/vehicles/{vin}/command/...`, scope `vehicle_cmd
 | `navigation_sc_request` | Navega a un Supercharger. |
 | `navigation_waypoints_request` | Envía una lista de paradas. |
 
-Condiciones: la app necesita *virtual key* instalada en el coche y los comandos van firmados (Vehicle Command Protocol) a través del proxy oficial `tesla-http-proxy` del repo `teslamotors/vehicle-command`; solo Model S/X anteriores a 2021 aceptan comandos sin firmar. El coche debe estar despierto; si está dormido hay que pagar un `wake_up` y esperar 10-60 s. En tu caso de uso (elegir destino en la pantalla del coche mientras conduces) el coche está despierto: **0,001 $ por envío**.
+Cuerpos exactos (no los publica la doc oficial; salen de la librería de Teslemetry y de Home Assistant):
+
+- `navigation_gps_request`: `{"lat": 38.72, "lon": -9.14, "order": 0}` (`order` = REPLACE/PREPEND/APPEND; Home Assistant lo retiró porque no observó efecto en un Model 3 Highland).
+- `navigation_request`: `{"type": "share_ext_content_raw", "locale": "es-ES", "timestamp_ms": <epoch ms>, "value": {"android.intent.extra.TEXT": "<dirección, 'lat,lon' o URL>"}}`.
+- `navigation_sc_request`: `{"id": <id de Supercharger>, "order": 0}`. `navigation_waypoints_request`: `{"waypoints": "<cadena sin documentar>"}`.
+
+**Matiz crítico sobre la firma (verificado en el código del 15-oct-2026):**
+
+- El proxy oficial `tesla-http-proxy` (`teslamotors/vehicle-command`, `pkg/proxy/command.go`) **no implementa** `navigation_gps_request`, `navigation_sc_request` ni `navigation_waypoints_request` como comandos firmados: responde `400 invalid_command`. Solo contempla `navigation_request`, y lo **reenvía sin firmar** al Fleet API ("sharing options require server-side processing"). El protobuf público de Tesla no contiene mensajes de navegación.
+- `navigation_request` sin firmar **funciona hoy** (proyecto tesla-fleet-voice: 23 de 24 envíos con HTTP 200 entre el 3 y el 11-oct-2026, en Norteamérica; con el coche dormido Tesla lo despertó sola). Es la vía más simple: un POST desde tu backend con el token OAuth del usuario, sin proxy. Riesgo: Tesla podría cerrarla sin aviso.
+- La vía **firmada** completa existe, pero fuera de Tesla: `Teslemetry/tesla-protocol` añade los mensajes `NavigationGpsRequest` (tag 53), `NavigationRequest` (21), `NavigationSuperchargerRequest` (22), `NavigationWaypointsRequest` (90) marcados `TESLEMETRY-EXT`, y `python-tesla-fleet-api` (Apache-2.0, v1.18.0, 13-oct-2026) los envía por `signed_command` o por BLE. Es lo que usa la integración oficial `tesla_fleet` de **Home Assistant** desde el 2-oct-2026 (`navigate_to_destination`, `navigate_to_coordinates`), probada en un Model 3 Highland 2024. Riesgo: si Tesla cambia el protobuf del coche, se rompe sin aviso.
+- No hay prueba publicada específica en un Model 3/Y europeo en 2025-2026, pero sí de comandos firmados en coches europeos (addon de Home Assistant probado con Model 3 y Model Y 2023 en Europa). La inferencia "funciona en la UE" es razonable, no verificada.
+- Requisitos comunes: scope `vehicle_cmds`; para la vía firmada y para la telemetría, *virtual key* emparejada desde la app de Tesla del propietario (≥ 4.27.3; cuentas "conductor" necesitan keycard). El coche debe estar despierto (`408` si duerme; `wake_up` cuesta 0,02 $ y tarda 10-60 s). En tu caso de uso el coche está despierto: **0,001 $ por envío**. Límites por coche: 20 llaves, 5 apps de telemetría, 3 dispositivos BLE.
+
+Opciones de implementación, de más simple a más robusta: (1) `navigation_request` sin firmar desde Next.js; (2) un microservicio Python con `python-tesla-fleet-api` (`VehicleSigned`) para `navigation_gps_request` firmado; (3) delegar en Tessie (`POST /{vin}/command/share`, 6,99 $/mes por usuario) o Teslemetry (~3,17 €/mes por coche), con la llave virtual de ellos, no la tuya.
 
 ### 4.3 Flujo de alta (lo que implementa el PR #10)
 
@@ -160,10 +174,14 @@ Estimaciones:
 |---|---|
 | 1 coche: 1-2 destinos/día + telemetría de ruta 1 h/día | 0,05-0,75 $ → **0 € efectivos** (crédito) |
 | 1 coche con *polling* de `vehicle_data` cada 30 s, 1 h/día | 7,20 $ (aún dentro del crédito, pero mala idea) |
-| 20.000 usuarios, solo enviar destinos, GPS del navegador | ~600 $ |
-| 20.000 usuarios + telemetría de ruta | ~1.100-3.000 $ |
-| 20.000 usuarios si cada envío despierta el coche | +12.000 $ |
-| 20.000 usuarios con *polling* | ~144.000 $ (inviable) |
+| 20.000 usuarios, solo enviar destinos (1-2/día), GPS del navegador, sin comprobar estado antes | ~600-1.200 $ |
+| 20.000 usuarios + telemetría "solo ruta" (destino, RouteLine, ETA; sin Location a 1 s) | +800-2.000 $ |
+| 20.000 usuarios comprobando `fleet_status`/`vehicles` antes de cada envío | +2.400-4.800 $ (evitable: el comando rechazado cuesta la mitad que la comprobación) |
+| 20.000 usuarios con telemetría "rica" (Location, velocidad, rumbo a 1 s) | +20.000-48.000 $ (innecesario: el navegador ya da el GPS) |
+| 20.000 usuarios si cada envío despierta el coche | +12.000-24.000 $ |
+| 20.000 usuarios con *polling* de `vehicle_data` | ~144.000 $ (inviable) |
+
+Lectura: con buen diseño (sin wakes, sin comprobaciones previas, telemetría mínima o ninguna) una app pública cuesta del orden de 1.400-3.200 $/mes a 20.000 usuarios; con mal diseño, decenas de miles. Delegar en Teslemetry (~63.000 €/mes a esa escala) o Tessie (~140.000 $/mes) solo tiene sentido para uso personal o prototipos.
 
 ### 4.5 Términos (Fleet API Agreement, versión 21-mar-2025; contraparte Tesla Motors Netherlands B.V.)
 
@@ -174,9 +192,19 @@ Estimaciones:
 - Zona gris real: una app de navegación/radares podría considerarse "competir con" la navegación de Tesla. No hay precedente público de baneo por esto, y codriver lleva meses operando como app registrada, pero conviene asumirlo como riesgo.
 - Desde mayo de 2025 el propietario ve en la app de Tesla cuántos comandos envía cada app de terceros.
 
-### 4.6 Alternativas sin registrar app propia (solo uso personal)
+### 4.6 Cómo lo hacen los terceros (oct-2026)
 
-Teslemetry (≈2,67 $ por 2.000 créditos; 1 crédito por comando) o MyTeslaMate permiten probar `navigation_gps_request` sin montar claves ni proxy. No sirven para una app pública: cada usuario tendría que pagar su propio proxy y el Agreement impide revender el acceso.
+| App | ¿Envía destino? | Vía | UE | Coste |
+|---|---|---|---|---|
+| App oficial de Tesla | Sí: Location > Navigate > "Send to Car" (app ≥ 4.57.0, 2026.20) y hoja de compartir desde Google/Apple Maps; multi-parada | Backend de Tesla | Sí | Gratis |
+| Tessie | Sí: `POST /{vin}/command/share?value=` (dirección, lat/lon o URL) y passthrough de cualquier endpoint Fleet API con firma automática | Fleet API (app de Tessie) | Sí (NA/EU/CN) | 6,99 $/mes, tarifas de Tesla incluidas |
+| Teslemetry | Sí: `navigation_gps_request` y `navigation_request` firmados; acción `teslemetry.navigation_gps_request` en Home Assistant; BLE beta | Fleet API firmado (extensiones TESLEMETRY-EXT) | Sí | ~3,17 €/mes por coche; 1 crédito por comando, 20 por wake |
+| Home Assistant `tesla_fleet` (app propia) | Sí desde 2-oct-2026 (`navigate_to_destination`, `navigate_to_coordinates`) | Tu propia app Fleet API + `python-tesla-fleet-api` | Sí | Tarifas de Tesla (crédito 10 $) |
+| ABRP | Sí ("Send to Tesla"), un solo waypoint, falla en algunos modelos | App Fleet API propia (llave `abetterrouteplanner.com`) | Sí | ABRP Premium |
+| codriver.io | **No** (solo lee destino y ruta) | Fleet Telemetry | Probable | Gratis / 6 $/mes |
+| TeslaMate, TeslaFi, Tronity | No | — | — | — |
+
+Para probar en tu coche sin registrar app: Teslemetry o Tessie. Para una app pública no sirven: cada usuario tendría que pagar su proxy y el Agreement impide revender el acceso.
 
 ---
 
@@ -304,7 +332,7 @@ Coste mensual: ≈ 0 (Vercel hobby + Upstash free + OpenFreeMap).
 
 1. Alta en developer.tesla.com con tu dominio, clave pública en `/.well-known/...`, registro en la región EU.
 2. Reutilizar del **PR #10** de upstream: OAuth de Tesla, `ConnectFlow` con QR desde el coche, almacenamiento cifrado de tokens, `docker-compose` con `vehicle-command`.
-3. Añadir lo que falta: ruta `/api/tesla/navigate` que llame a `navigation_gps_request` (o `navigation_waypoints_request`) a través del proxy firmado cuando el usuario elige un destino en la búsqueda o con pulsación larga en el mapa. Resultado: **buscas en tu app y el Tesla navega con su navegador nativo** (con Autopilot/FSD, carga planificada, etc.).
+3. Añadir lo que falta: ruta `/api/tesla/navigate` que, cuando el usuario elige un destino en la búsqueda o con pulsación larga, envíe `navigation_request` (`share_ext_content_raw` con `"lat,lon"` o la dirección) con el token OAuth del usuario. Es un POST sin proxy y funciona hoy. Si Tesla lo cierra o se quiere `navigation_gps_request` con `order`, añadir un microservicio Python con `python-tesla-fleet-api` (`VehicleSigned`) que firme con la clave privada de la app (el proxy oficial `vehicle-command` no sirve para estos comandos). Resultado: **buscas en tu app y el Tesla navega con su navegador nativo** (con Autopilot/FSD, planificación de carga, etc.).
 4. Opcional: Fleet Telemetry para pintar la ruta nativa y el ETA del coche en tu mapa (como codriver "Car route"). Requiere un servidor con IP pública y certificado en el puerto 443 (una VPS pequeña basta; Ryan usa una EC2).
 5. Comprobar `fleet_status`/estado online antes de enviar para no pagar comandos rechazados ni wakes.
 
@@ -330,6 +358,7 @@ Coste: 0 € para tu coche (crédito de 10 €). Scopes mínimos: `vehicle_cmds`
 
 1. Que Tesla interprete una app de navegación/radares como competencia (§5.6.21). Mitigación: posicionarla como complemento (alertas) que **envía destinos al navegador nativo**, no que lo sustituye.
 2. Rechazos técnicos de registro en la UE (HTTP 424 reportados en 2026 sin explicación).
+2b. **Fragilidad del envío de destinos:** la vía sin firmar depende de que Tesla siga procesando `navigation_request` en su backend; la vía firmada depende de extensiones del protobuf que Tesla no publica (TESLEMETRY-EXT). Ninguna de las dos tiene garantía; ambas funcionan en octubre de 2026.
 3. Cambios de firmware que rompen webapps (como el de 2026.26). Mitigación: pruebas tras cada release.
 4. Arranque en frío de los reportes comunitarios.
 5. **CarPlay en Tesla** (no lanzado a 15-oct-2026, sin fecha): si llega en una ventana con Waze/Google Maps, el valor de una app de navegador cae en los coches compatibles (rumor: solo AMD). Mitigación: centrarse en lo que CarPlay no da dentro del coche (integración con la navegación nativa vía Fleet API, radares de tramo ES/PT, alertas sin Premium).
