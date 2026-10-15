@@ -11,7 +11,7 @@ Fecha del análisis: 15 de octubre de 2026. Repositorio analizado: `vmsebas/tesl
 1. **Tu fork es la versión "muerta".** Es idéntico, commit a commit, al `main` público de Ryan Vogel, que se congeló el 21-mar-2026 con el modo *shutdown* activado por defecto. Tal cual, no arranca la app ni funcionan las alertas.
 2. **Por qué murió:** las alertas salían de un endpoint no documentado de Waze (`/live-map/api/georss`). Desde marzo de 2026 el propio frontend de Waze adjunta una cabecera `X-Recaptcha-Token` (reCAPTCHA Enterprise) a cada llamada; sin ese token el endpoint devuelve `403`. Lo he comprobado hoy. Además, Mapbox costaba ~1.500 USD/mes con ~20.000 usuarios.
 3. **Alguien sí encontró la forma: tres caminos distintos.**
-   - Ryan relanzó teslanav.com en julio de 2026 con una **reescritura cerrada**: MapLibre + tiles gratuitos de OpenFreeMap + satélite de ArcGIS + **reportes propios de usuarios** (`/api/reports`). Coste de mapas ≈ 0. No usa la API de Tesla.
+   - Ryan relanzó teslanav.com en julio de 2026 con una reescritura: MapLibre + tiles gratuitos de OpenFreeMap + satélite Esri + **reportes propios de usuarios** + radares desde datos abiertos, todo en un contenedor Docker sin servicios de pago. Coste de mapas ≈ 0. No usa la API de Tesla. **Su código está en la rama `feature/billboards` del fork `jtmaveryk/teslanav`** (23 commits de Ryan). Sus alertas de Waze salen de un canal no oficial que va contra los términos de Waze; esa parte no es reutilizable con seguridad.
    - **codriver.io** (empresa de Québec) es una **app oficial de la Tesla Fleet API** (publica su clave en `/.well-known/appspecific/com.tesla.3p.public-key.pem`), usa **Fleet Telemetry** para leer la ruta activa del coche ("Car route", Premium), reportes comunitarios, radares de **OpenStreetMap**, y una capa de incidentes **atribuida a Waze** que sigue viva hoy. Mapa base propio con Protomaps.
    - El fork **ShayalaW/teslanav.com ("Radar")** añadió reportes comunitarios con 15 tipos, navegación guiada por voz, límite de velocidad y wake lock (37 commits, sep-2026), pero sigue atado a Mapbox y al endpoint muerto de Waze.
 4. **La API de Tesla permite las dos cosas que preguntas.** Leer posición/ruta (vehicle_data o Fleet Telemetry) y **enviar un destino a la navegación nativa** (`navigation_gps_request`, `navigation_request`, `navigation_waypoints_request`). codriver solo lee por decisión propia; enviar destinos es técnicamente posible y oficial.
@@ -62,7 +62,9 @@ Dependencias de pago o con límite: Mapbox (loads, tiles, directions), LocationI
 - Endpoints propios: `/api/reports`, `/api/reports/vote`, `/api/suggestions`, `/api/feedback`, `/api/analytics`. Las alertas son **pines creados por los usuarios** con votos; la página de comparación de codriver lo describe igual ("alerts come from user-added pins").
 - No hay clave pública de Tesla en `teslanav.com/.well-known/appspecific/...` (404): el relanzamiento **no usa la API de Tesla**.
 - Donaciones por Stripe. Título SEO sigue diciendo "Waze Alerts for Tesla".
-- **Ese código nuevo no está publicado.** El repo público sigue en el commit del cierre.
+- **Corrección tras revisar los 29 forks: buena parte del código del relanzamiento sí está publicada**, aunque no en el repo de Ryan: la rama `feature/billboards` del fork **`jtmaveryk/teslanav`** contiene 23 commits de Ryan Vogel (22-30 de julio de 2026): reportes de policía y peligros desde el mapa, votación y caducidad de reportes, capa de radares fijos y de semáforo desde datos abiertos, unidades por idioma, tema automático por hora solar, panel de administración y despliegue Docker. Ya está descargada en tu clon local como `fork-jtmaveryk-teslanav/feature/billboards`.
+- **Arquitectura reutilizable de esa rama (leída en el código):** un solo contenedor Docker con Next.js 16.2, Redis en memoria y SQLite; `maplibre-gl` 5.13 con estilos de OpenFreeMap y satélite Esri/USGS; sin Mapbox, PostHog, Vercel Blob ni LocationIQ. `/api/directions`, `/api/geocode` y el Overpass de radares quedan como "stubs vacíos intencionados": **no hay navegación ni búsqueda**. Los reportes propios tienen TTL por tipo, un reporte igual a menos de 250 m cuenta como confirmación, límites por IP y votos. El importador de radares solo trae datos abiertos de **Chicago y Washington DC** más OSM (por eso en Lisboa devuelve 0 cámaras); es el punto donde enchufar DGT, Cataluña, Francia y OSM.
+- **Su capa de Waze:** las alertas que hoy sirve `teslanav.com/api/waze` (comprobado en vivo: 28 atascos en Lisboa y 34 alertas en Madrid, con 1 de policía) salen de un **canal no oficial de Waze** reimplementado en el servidor, más un *userscript* opcional que reenvía datos desde el navegador del propio usuario. Ambas vías van contra los Términos de Uso de Waze, dependen de que Waze no cambie su protocolo (el propio código prevé el caso de que deje de aceptar la versión que imita) y Waze lleva todo 2026 cerrando canales no oficiales. No voy a documentar cómo funciona ni recomiendo apoyarse en ello: es una decisión de riesgo tuya, y mi consejo es usarlo como mucho en una instancia personal y nunca como base de un producto.
 
 **PRs abiertos en el repo público (no fusionados):**
 
@@ -70,11 +72,21 @@ Dependencias de pago o con límite: Mapbox (loads, tiles, directions), LocationI
 - **#11 "Add Waze-style current speed and speed limit display" (21-ago-2026).** Velocidad actual y límite de velocidad por carretera cercana, con `maxspeed` de OSM.
 - **#9** (usuario `hearhour`, mar-2026): solo invierte el flag de shutdown.
 
-### 3.2 Forks
+### 3.2 Los 29 forks, uno por uno (HEAD de cada rama comparado con upstream el 15-oct-2026)
 
-7 forks visibles, todos con 0 estrellas. Seis son copias sin cambios. El único con trabajo real:
+| Fork | Respecto a upstream | Qué aporta |
+|---|---|---|
+| **jtmaveryk/teslanav** (rama `feature/billboards`) | 23 commits por delante, autor Ryan Vogel (jul-2026) | **El código del relanzamiento** (ver 3.1). Lo más valioso del ecosistema. |
+| **ShayalaW/teslanav.com** ("Radar") | 37 commits por delante (sep-2026) | Reportes comunitarios con 15 tipos, navegación con voz, límite de velocidad, cortes "road ahead", wake lock, soporte móvil. Sigue atado a Mapbox y al endpoint muerto de Waze. |
+| VMan228/teslanav.com | 38 commits por delante (may-2026) | Un "sidecar" que automatiza un navegador real (con proxies residenciales, cookies exportadas y perfiles persistentes) para seguir sacando el `georss` de Waze. Es exactamente lo que Waze prohíbe y lo que no recomiendo. |
+| cadevass/teslanav.com | 10 commits (may-2026) | Pequeñas mejoras de UI: banner de giro, aviso de radar, km en vez de millas, ajustes para Australia. |
+| hearhour/teslanav.com (`main` y `patch-1`) | 1 commit cada rama (mar-2026) | Solo invierte el flag de shutdown (es el PR #9). |
+| samhithpadala/teslanav.com | 1 commit (jul-2026) | Borra dos imágenes. |
+| n0tadev0, olsoybakk | Idénticos (copian también las ramas de upstream) | Nada. |
+| bfayers, Marzssss | Por **detrás** de upstream (instantáneas antiguas) | Nada. |
+| Los otros 19 (bbb13713, ChosenZero, dreaded369, fernando-barroso, iiKline, ImJustRicky, josenadajlpm-eng, llewy, mangopudding, martinsv, MRVAPORWAVE25, Narthic, Raccity007, rusoku2, stevenlandon, TonyDeLuca, vitalikarmanov, vushnjyov, vmsebas) | Idénticos a upstream | Nada. |
 
-- **ShayalaW/teslanav.com → "Radar"** (radar-tesla.vercel.app), 37 commits entre el 10 y el 18 de septiembre de 2026, 59 ficheros: reportes comunitarios con 15 tipos (`police_hidden`, `police_visible`, `police_pulled_over`, `traffic_*`, `hazard_*`, `accident`, `road_closed`) con confirmaciones, descartes y token de borrado; navegación guiada con banner de maniobra, voz y reruteo; límite de velocidad por *map matching* de Mapbox; avisos de cortes "road ahead"; avisos de voz y de radares; wake lock; auto-zoom; soporte móvil; feedback por Web3Forms. Sigue usando Mapbox (Directions, Search Box, Matching, tilequery) y mantiene la ruta `/api/waze` apuntando al endpoint muerto.
+Conclusión: solo dos forks tienen código que nos interesa (jtmaveryk con el relanzamiento de Ryan, y "Radar" con la capa de reportes y voz), y los dos únicos intentos de recuperar Waze (el canal no oficial de Ryan y el sidecar de VMan228) son precisamente lo que conviene no copiar.
 
 ### 3.3 codriver.io (el competidor que sí lo ha resuelto)
 
@@ -355,8 +367,9 @@ Precios Mapbox 2026 (mapbox.com/pricing): *map loads* web 50.000 gratis y luego 
 
 ### Fase A — Revivir el fork sin costes fijos (1-2 semanas de trabajo)
 
-1. `NEXT_PUBLIC_PROJECT_SHUTDOWN=false` y limpiar el modo shutdown.
-2. Sustituir `mapbox-gl` por **MapLibre GL** con tiles de **OpenFreeMap** (o PMTiles propios en R2 si se quiere independencia total) y satélite de ArcGIS. Eliminar el proxy de tiles de Vercel Blob (ya no hace falta) o reutilizarlo para la capa de cámaras.
+0. **Punto de partida:** no arrancar desde `main` (la versión muerta) sino desde la rama del relanzamiento de Ryan (`fork-jtmaveryk-teslanav/feature/billboards`, ya en tu clon), que trae hechos MapLibre + OpenFreeMap, Docker autocontenido, reportes con confirmaciones y votos, importador de radares y tema solar. Quitar su capa de Waze no oficial y el relay, y mantener el resto. Si se prefiere Vercel en lugar de Docker, portar solo `components/Map.tsx`, `lib/map-styles.ts`, `/api/reports` y `lib/speed-cameras.ts`.
+1. Limpiar el modo shutdown (si se parte de `main`: `NEXT_PUBLIC_PROJECT_SHUTDOWN=false`).
+2. Mapa: **MapLibre GL** con tiles de **OpenFreeMap** (o PMTiles propios en R2 si se quiere independencia total); satélite con ArcGIS Location Platform y API key si la app no es solo personal. Eliminar el proxy de tiles de Vercel Blob.
 3. Radares: generar un GeoJSON estático **OSM + DGT (DATEX II) + ANSR**, servido desde `/public` o CDN; eliminar la dependencia de Overpass en vivo. Añadir radares de tramo con sus dos extremos.
 4. Alertas: portar el sistema de **reportes comunitarios** (el fork "Radar" ya tiene tipos, votos y expiración; el PR #11 tiene velocidad y límite). Para uso personal se puede añadir la capa de codriver vía su API pública mientras no sea comercial.
 5. Voz y avisos: reutilizar `alert-sound.mp3` y añadir **clips pregrabados** en español/portugués (el navegador del Tesla no tiene voces de síntesis), con un toque inicial para desbloquear el audio; umbral por distancia y rumbo como ya hace `isAlertAhead`.
@@ -397,7 +410,8 @@ Coste: 0 € para tu coche (crédito de 10 €). Scopes mínimos: `vehicle_cmds`
 2. Rechazos técnicos de registro en la UE (HTTP 424 reportados en 2026 sin explicación).
 2b. **Fragilidad del envío de destinos:** la vía sin firmar depende de que Tesla siga procesando `navigation_request` en su backend; la vía firmada depende de extensiones del protobuf que Tesla no publica (TESLEMETRY-EXT). Ninguna de las dos tiene garantía; ambas funcionan en octubre de 2026.
 3. Cambios de firmware que rompen webapps (como el de 2026.26). Mitigación: pruebas tras cada release.
-4. Arranque en frío de los reportes comunitarios.
+4. Arranque en frío de los reportes comunitarios. Mitigación: sembrar el mapa con DGT/SCT/TomTom y radares oficiales desde el primer día.
+4b. **Tentación de reutilizar la capa Waze del relanzamiento:** funciona hoy en España y Portugal, pero es un canal no oficial contrario a los términos de Waze y puede cortarse sin aviso, como pasó en marzo. Si se usa, que sea en una instancia personal y con la app preparada para vivir sin ella.
 5. **CarPlay en Tesla** (no lanzado a 15-oct-2026, sin fecha): si llega en una ventana con Waze/Google Maps, el valor de una app de navegador cae en los coches compatibles (rumor: solo AMD). Mitigación: centrarse en lo que CarPlay no da dentro del coche (integración con la navegación nativa vía Fleet API, radares de tramo ES/PT, alertas sin Premium).
 6. **Cambios de firmware del navegador** (UA sin "Tesla", DPR variable, bloqueador de anuncios): la app debe probarse en cada release y no depender del User-Agent.
 
