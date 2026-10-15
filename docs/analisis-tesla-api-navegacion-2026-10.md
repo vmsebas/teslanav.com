@@ -92,6 +92,17 @@ Arquitectura observada (web pública, API pública, términos y changelog):
 - **API para terceros**: lectura `GET /v2/entities/nearby` (60 req/min sin cuenta, 120 con cuenta; sin CORS, solo servidor) **para uso personal y no comercial**; reutilización masiva o comercial requiere acuerdo. También *feeds* de escritura (push/pull) para aportar datos.
 - **Navegador del Tesla**: el software 2026.26 trae Chromium 148 y cambió la densidad de píxeles (rompió el tamaño de muchas webapps); 2026.20 permite bloquear el navegador con controles parentales; desde 2026.26 el navegador puede pedir cámara/micrófono aparcado en coches Ryzen. Compatibilidad declarada: MCU2 (Intel Atom) y MCU3 (Ryzen).
 
+#### Lecciones técnicas del cliente público de codriver (código JS servido a cualquier navegador, sin cuenta)
+
+- **No usa bundler**: ficheros separados (`app.js`, `nav-lib.js`, `pair.js`, `tesla-sync.js`, `telemetry.js`, `persistent-connection.js`, `peregrine.js` de 3,4 MB con three.js). Útil para depurar en el coche.
+- **GPS**: `navigator.geolocation.watchPosition(..., { enableHighAccuracy, maximumAge: 1000 })`, con un "medidor" de fixes para detectar GPS congelado. Confirma que el GPS del navegador del Tesla es la fuente de posición (no la API de Tesla).
+- **Densidad de píxeles**: comentarios en el código indican que 2026.26 pasó `devicePixelRatio` de 1,0 a 1,53 y que añadieron un *shim* para que la geometría del mapa no cambie. Cualquier app para el Tesla debe tratar el DPR como variable.
+- **Voz**: `speechSynthesis.speak(new SpeechSynthesisUtterance(...))` del propio navegador; no hay TTS externo. No usan Wake Lock API (no aparece en el código).
+- **Emparejamiento con Tesla desde el coche**: `/api/pair/start` genera un QR que el móvil abre; el coche hace *polling* de `pollUrl` y canjea con `/api/pair/exchange`. La sesión del coche queda ligada a la cuenta sin teclear nada en la pantalla. Es el mismo patrón que `ConnectFlow` del PR #10 de upstream.
+- **Datos del coche**: `/api/tesla/destination` (recoger el destino fijado en el navegador del Tesla, flag `teslaDestHandoff`), `/api/tesla/telemetry/state`, `/v2/car-route` y `/v2/car-route/eta` (ruta nativa vía Fleet Telemetry), `/api/garage/vehicles`.
+- **Capas y servicios propios**: `/v2/entities/nearby`, `/v2/observations` (confirmaciones), `/v2/speed-limits/nearby` y `/v2/speed-limit-reports` (límites de velocidad con corrección comunitaria), `/v2/closure-candidates` y `/v2/closure-span` (cortes), `/v2/route/price` (peajes). Config pública: tiles Protomaps en `tiles.codriver.io`, terreno en WebP (zoom máx. 12), capa de árboles, fuentes propias, `trafficRelay: true`, `mapMatch: true`. Sigue existiendo un token público de Mapbox en la configuración para *directions* y *map matching*.
+- **Rendimiento**: `view-modes.js` distingue MCU2 para degradar el modo 3D; el renderer "Peregrine" (three.js, GLTF, WebGL) sustituye a MapLibre en 3D.
+
 ### 3.4 Qué pide la gente
 
 - Avisos de policía son la función más demandada (es lo que hacía TeslaWaze y TeslaNav); TeslaWaze murió con el corte de Waze y no volvió.
@@ -223,7 +234,16 @@ Impacto en este repo: `components/Map.tsx` usa `setTerrain` con `mapbox-terrain-
 
 - Hechos confirmados: `navigator.geolocation` funciona hoy (teslanav.com y codriver dependen de ello); 2026.26 = Chromium 148 y nueva densidad de píxeles; 2026.20 = controles parentales; codriver soporta MCU2 y MCU3 y ha tenido que reescribir su renderer 3D por rendimiento en MCU2.
 - **[pendiente]** Disponibilidad del navegador en marcha en España/Portugal frente a EE. UU., y detalles de wake lock, audio y pantalla completa.
-- **[pendiente]** Si Tesla ya avisa de radares de serie en Europa, estado de CarPlay en Tesla (octubre 2026) y novedades de navegación 2026.x.
+### 7.2 Qué ofrece Tesla de serie (verificado)
+
+- **Radares fijos, sí, pero con condiciones.** Desde la Holiday Update de dic-2023 (2023.44.30.x) el navegador muestra iconos de radar fijo, móvil, de tramo y de semáforo y avisa del siguiente radar sobre el módulo de giro. Desde 2024.14 (abr-2024) hay aviso sonoro ("Speed Camera Chime", en el manual portugués "Aviso sonoro do radar de controlo da velocidade") y "Average Speed Zones". Requiere **Conectividad Premium + rutas en línea** y, según los propietarios españoles (Club Tesla España, jun-2024), solo funciona **con una ruta activa**, con fallos en radares de tramo (Guadarrama, A-5) y huecos de cobertura; muchos siguen usando Radarbot o Waze en paralelo.
+- **"Speed Cameras on Route" (Summer Update 2026, 2026.26.x):** símbolos de radares a lo largo de la ruta, Premium obligatorio. Los trackers de flota lo observan activo en España (AT, BE, BG, CZ, DK, ES, FI, FR, GB, IT, MD, NL, NO); **Portugal, Alemania y EE. UU. no aparecen** a 15-oct-2026. El manual excluye Francia del icono de radar ("Excluding France"), lo que sugiere un modo "zonas de peligro".
+- **No hay alertas colaborativas nativas** (policía, objetos en la vía, vehículos parados). A finales de agosto de 2026 varias fuentes lo señalan explícitamente, a raíz de que Rivian integrara las alertas de Waze (policía + radares) en su OTA 2026.31. Tesla muestra obras y, según referencias de código de 2024, accidentes/cortes, pero sin reportes de usuarios.
+- **"Cop Mode" (InsideEVs, 27-dic-2025)** no era una función de Tesla: era **TeslaNav** abierto en el navegador del coche mostrando reportes de Waze. La prensa ya ha identificado esta propuesta de valor bajo el nombre TeslaNav.
+- **CarPlay (el mayor riesgo estratégico):** Bloomberg (13-nov-2025) reveló pruebas internas de CarPlay inalámbrico en una ventana de la interfaz; retraso en feb-2026 por la sincronización Apple Maps ↔ navegación Tesla con FSD; Apple presentó "Route Sharing" en WWDC26 (jun-2026). A 15-oct-2026 **no está lanzado**, Tesla no lo ha anunciado y la prensa duda entre "Holiday Update 2026" y "cancelado". Rumor: solo MCU AMD/Ryzen. Si llega, Waze y Google Maps correrían en pantalla con sus alertas y una app de navegador perdería valor en los coches compatibles. Android Auto: ningún indicio.
+- **Sin App Store ni SDK en pantalla:** la única vía oficial para interfaz de terceros sigue siendo el navegador; la Fleet API cubre datos y comandos remotos, incluido enviar destinos al navegador nativo. "Enviar al coche" desde Google/Apple Maps funciona vía la hoja de compartir de la app Tesla (manual oficial).
+- **Europa:** desde jul-2024 (GSR2/ISA) los Tesla nuevos avisan con sonido al superar el límite. Grok llegó a España y Portugal el 16-feb-2026 (2026.2.6; AMD + Premium) y desde 2026.26 fija destinos por voz. Novedades 2026.26: Preferred Routes (no observado en ES/PT), Automatic Navigation (sí en ES/PT), Set Arrival Energy. FSD Supervisado sigue pendiente de aprobación en España y Portugal (voto europeo aplazado a diciembre de 2026).
+- **Hueco real que Tesla no cubre:** alertas colaborativas en tiempo real (policía, accidentes, objetos, radares móviles), avisos de radares sin ruta activa y sin Premium, y cobertura/calidad de radares de tramo en España y Portugal. Fuentes: notateslaapp.com (release notes 2024.14, 2026.26.1, 2026.26.6.1; "Rivian adds Waze integration", 28-ago-2026), tesla-info.com/release/2026.26, foro.clubtesla.es (hilo 10457), insideevs.com/news/782854, macrumors.com (13-nov-2025, 16-feb-2026), 9to5mac.com (15-jun-2026, 07-ago-2026).
 
 ---
 
@@ -272,7 +292,8 @@ Coste: 0 € para tu coche (crédito de 10 €). Scopes mínimos: `vehicle_cmds`
 2. Rechazos técnicos de registro en la UE (HTTP 424 reportados en 2026 sin explicación).
 3. Cambios de firmware que rompen webapps (como el de 2026.26). Mitigación: pruebas tras cada release.
 4. Arranque en frío de los reportes comunitarios.
-5. **[pendiente]** Disponibilidad del navegador en marcha en Europa y funciones nativas de Tesla que puedan solapar.
+5. **CarPlay en Tesla** (no lanzado a 15-oct-2026, sin fecha): si llega en una ventana con Waze/Google Maps, el valor de una app de navegador cae en los coches compatibles (rumor: solo AMD). Mitigación: centrarse en lo que CarPlay no da dentro del coche (integración con la navegación nativa vía Fleet API, radares de tramo ES/PT, alertas sin Premium).
+6. **[pendiente]** Disponibilidad del navegador en marcha en Europa.
 
 ---
 
