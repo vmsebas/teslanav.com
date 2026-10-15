@@ -8,148 +8,121 @@ interface UseSpeedCamerasOptions {
   bounds: MapBounds | null;
   refreshInterval?: number; // milliseconds
   debounceMs?: number;
-  minMovementThreshold?: number;
   enabled?: boolean;
-  minZoomLevel?: number; // minimum zoom level to fetch (prevents overloading servers when zoomed out)
+  minZoomLevel?: number;
+  bufferMultiplier?: number; // fetch area larger than the viewport
 }
 
-// Calculate the overlap between two bounds (0 = no overlap, 1 = identical)
-function calculateBoundsOverlap(a: MapBounds, b: MapBounds): number {
-  const intersectLeft = Math.max(a.west, b.west);
-  const intersectRight = Math.min(a.east, b.east);
-  const intersectBottom = Math.max(a.south, b.south);
-  const intersectTop = Math.min(a.north, b.north);
-
-  if (intersectLeft >= intersectRight || intersectBottom >= intersectTop) {
-    return 0;
-  }
-
-  const intersectArea = (intersectRight - intersectLeft) * (intersectTop - intersectBottom);
-  const aArea = (a.east - a.west) * (a.north - a.south);
-  const bArea = (b.east - b.west) * (b.north - b.south);
-  
-  const smallerArea = Math.min(aArea, bArea);
-  return smallerArea > 0 ? intersectArea / smallerArea : 0;
+// Check if viewport is fully contained within previously fetched bounds
+function isContained(viewport: MapBounds, fetched: MapBounds): boolean {
+  return (
+    viewport.west >= fetched.west &&
+    viewport.east <= fetched.east &&
+    viewport.south >= fetched.south &&
+    viewport.north <= fetched.north
+  );
 }
 
+function expandBounds(bounds: MapBounds, multiplier: number): MapBounds {
+  const horizontalPadding = (bounds.east - bounds.west) * ((multiplier - 1) / 2);
+  const verticalPadding = (bounds.north - bounds.south) * ((multiplier - 1) / 2);
+  return {
+    west: bounds.west - horizontalPadding,
+    east: bounds.east + horizontalPadding,
+    south: bounds.south - verticalPadding,
+    north: bounds.north + verticalPadding,
+    zoom: bounds.zoom,
+  };
+}
+
+/**
+ * Fixed camera locations from our own SQLite via /api/speedcameras.
+ * The data is static, so we refetch only when the viewport leaves the last
+ * fetched area or on a slow periodic refresh.
+ */
 export function useSpeedCameras({
   bounds,
-  refreshInterval = 300000, // 5 minutes (cameras don't change often)
-  debounceMs = 400, // 400ms - slightly longer than Waze since cameras are less urgent
-  minMovementThreshold = 0.25, // Fetch if viewport changed by 25%+
+  refreshInterval = 600_000, // 10 minutes - fixed cameras rarely change
+  debounceMs = 600,
   enabled = true,
-  minZoomLevel = 10, // Don't fetch when zoomed out past city level to avoid overloading servers
+  minZoomLevel = 10,
+  bufferMultiplier = 2,
 }: UseSpeedCamerasOptions) {
   const [cameras, setCameras] = useState<SpeedCamera[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  
+
   const debounceTimer = useRef<NodeJS.Timeout | null>(null);
   const lastFetchedBounds = useRef<MapBounds | null>(null);
   const lastBounds = useRef<MapBounds | null>(null);
-  
-  // Rate limiting state
+  const activeController = useRef<AbortController | null>(null);
   const requestTimestamps = useRef<number[]>([]);
-  const backoffUntil = useRef<number>(0);
-  const consecutiveErrors = useRef<number>(0);
 
-  // Check if we can make a request
   const canMakeRequest = useCallback((): boolean => {
     const now = Date.now();
-    
-    if (now < backoffUntil.current) {
-      return false;
-    }
-    
-    // Clean up old timestamps (older than 1 minute)
     requestTimestamps.current = requestTimestamps.current.filter(
-      (ts) => now - ts < 60000
+      (timestamp) => now - timestamp < 60_000
     );
-    
-    // Allow max 6 requests per minute (server caching handles dedup)
     return requestTimestamps.current.length < 6;
   }, []);
-
-  const recordRequest = useCallback(() => {
-    requestTimestamps.current.push(Date.now());
-  }, []);
-
-  const handleRateLimitError = useCallback(() => {
-    consecutiveErrors.current += 1;
-    const backoffTime = Math.min(60000 * Math.pow(2, consecutiveErrors.current - 1), 300000);
-    backoffUntil.current = Date.now() + backoffTime;
-    console.warn(`OSM rate limited. Backing off for ${backoffTime / 1000}s`);
-  }, []);
-
-  const handleSuccess = useCallback(() => {
-    consecutiveErrors.current = 0;
-  }, []);
-
-  const hasSignificantMovement = useCallback(
-    (newBounds: MapBounds): boolean => {
-      if (!lastFetchedBounds.current) return true;
-      
-      const overlap = calculateBoundsOverlap(lastFetchedBounds.current, newBounds);
-      // If overlap is at or below (1 - threshold), we've moved enough
-      return overlap <= (1 - minMovementThreshold);
-    },
-    [minMovementThreshold]
-  );
 
   const fetchCameras = useCallback(
     async (currentBounds: MapBounds, force: boolean = false) => {
       if (!enabled) return;
-      
-      // Check zoom level - don't fetch if zoomed out too far
-      if (currentBounds.zoom !== undefined && currentBounds.zoom < minZoomLevel) {
-        console.log(`OSM request skipped: zoom level ${currentBounds.zoom.toFixed(1)} below minimum ${minZoomLevel}`);
+      if (
+        currentBounds.zoom !== undefined &&
+        currentBounds.zoom < minZoomLevel
+      ) {
         return;
       }
-      
-      if (!canMakeRequest()) {
-        console.log("OSM request skipped: rate limit");
+      if (
+        !force &&
+        lastFetchedBounds.current &&
+        isContained(currentBounds, lastFetchedBounds.current)
+      ) {
         return;
       }
+      if (!canMakeRequest()) return;
 
-      if (!force && !hasSignificantMovement(currentBounds)) {
-        console.log("OSM request skipped: insufficient movement");
-        return;
-      }
+      const expanded = expandBounds(currentBounds, bufferMultiplier);
+      activeController.current?.abort();
+      const controller = new AbortController();
+      activeController.current = controller;
 
       try {
         setLoading(true);
         setError(null);
-        recordRequest();
+        requestTimestamps.current.push(Date.now());
 
         const params = new URLSearchParams({
-          left: currentBounds.west.toString(),
-          right: currentBounds.east.toString(),
-          bottom: currentBounds.south.toString(),
-          top: currentBounds.north.toString(),
+          left: expanded.west.toString(),
+          right: expanded.east.toString(),
+          bottom: expanded.south.toString(),
+          top: expanded.north.toString(),
         });
-
-        const response = await fetch(`/api/speedcameras?${params}`);
-
-        if (response.status === 429) {
-          handleRateLimitError();
-          throw new Error("Rate limited");
-        }
+        const timeout = setTimeout(() => controller.abort(), 15_000);
+        const response = await fetch(`/api/speedcameras?${params}`, {
+          signal: controller.signal,
+        }).finally(() => clearTimeout(timeout));
 
         if (!response.ok) {
-          throw new Error("Failed to fetch speed cameras");
+          throw new Error(`Failed to fetch speed cameras (${response.status})`);
         }
 
         const data = await response.json();
         setCameras(data.cameras || []);
-        lastFetchedBounds.current = currentBounds;
-        handleSuccess();
+        lastFetchedBounds.current = expanded;
       } catch (err) {
+        if (err instanceof DOMException && err.name === "AbortError") return;
         setError(err instanceof Error ? err.message : "Unknown error");
       } finally {
-        setLoading(false);
+        if (activeController.current === controller) {
+          activeController.current = null;
+          setLoading(false);
+        }
       }
     },
-    [enabled, canMakeRequest, hasSignificantMovement, recordRequest, handleRateLimitError, handleSuccess, minZoomLevel]
+    [enabled, canMakeRequest, minZoomLevel, bufferMultiplier]
   );
 
   // Debounced fetch when bounds change
@@ -159,9 +132,7 @@ export function useSpeedCameras({
     if (debounceTimer.current) {
       clearTimeout(debounceTimer.current);
     }
-
     lastBounds.current = bounds;
-
     debounceTimer.current = setTimeout(() => {
       fetchCameras(bounds);
     }, debounceMs);
@@ -173,18 +144,23 @@ export function useSpeedCameras({
     };
   }, [bounds, debounceMs, fetchCameras, enabled]);
 
-  // Periodic refresh
+  // Slow periodic refresh (picks up admin re-imports)
   useEffect(() => {
     if (!enabled) return;
-    
     const interval = setInterval(() => {
       if (lastBounds.current) {
         fetchCameras(lastBounds.current, true);
       }
     }, refreshInterval);
-
     return () => clearInterval(interval);
   }, [refreshInterval, fetchCameras, enabled]);
+
+  useEffect(() => {
+    return () => {
+      activeController.current?.abort();
+      if (debounceTimer.current) clearTimeout(debounceTimer.current);
+    };
+  }, []);
 
   return {
     cameras,
@@ -193,4 +169,3 @@ export function useSpeedCameras({
     refetch: () => bounds && fetchCameras(bounds, true),
   };
 }
-

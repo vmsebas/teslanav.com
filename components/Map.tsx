@@ -1,47 +1,48 @@
 "use client";
 
 import { useEffect, useRef, useState, useImperativeHandle, forwardRef, useCallback } from "react";
-import mapboxgl from "mapbox-gl";
-import "mapbox-gl/dist/mapbox-gl.css";
+import maplibregl from "maplibre-gl";
+import "maplibre-gl/dist/maplibre-gl.css";
+import { DEFAULT_MAP_STYLE, OPENFREEMAP_STYLES } from "@/lib/map-styles";
+import { formatSpeedLimit, type UnitSystem } from "@/lib/units";
 import type { WazeAlert, MapBounds } from "@/types/waze";
 import type { SpeedCamera } from "@/types/speedcamera";
 import type { RouteData } from "@/types/route";
-
-import posthog from "posthog-js";
-
-const MAPBOX_TOKEN = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || "";
 
 interface MapProps {
   center?: [number, number]; // [lng, lat]
   zoom?: number;
   isDarkMode?: boolean;
+  styleUrl?: string;
+  satelliteTilesUrl?: string;
+  satelliteAttribution?: string;
+  satelliteMaxZoom?: number;
   alerts?: WazeAlert[];
   speedCameras?: SpeedCamera[];
+  unitSystem?: UnitSystem;
+  onReportVote?: (
+    reportId: string,
+    vote: "confirm" | "gone"
+  ) => Promise<{ removed?: boolean } | null>;
   onBoundsChange?: (bounds: MapBounds) => void;
   onCenteredChange?: (isCentered: boolean) => void;
-  onLongPress?: (lng: number, lat: number, screenX: number, screenY: number) => void;
-  pinLocation?: { lng: number; lat: number } | null;
   route?: RouteData | null; // Legacy single route support
   routes?: RouteData[]; // Multiple routes for selection
   selectedRouteIndex?: number; // Which route is selected (0 = first/fastest)
-  userLocation?: { 
-    latitude: number; 
-    longitude: number; 
+  userLocation?: {
+    latitude: number;
+    longitude: number;
     heading?: number | null;
     effectiveHeading?: number | null;
     speed?: number | null; // m/s
   } | null;
   followMode?: boolean;
-  showTraffic?: boolean;
-  useSatellite?: boolean;
   showAvatarPulse?: boolean;
   // Dev mode - show alert radius ring
   showAlertRadius?: boolean;
   alertRadiusMeters?: number;
   // Dev mode - show cached Waze tile bounds
   debugTileBounds?: Array<{ bounds: MapBounds; ageMs: number }>;
-  // 3D terrain mode
-  use3DMode?: boolean;
 }
 
 export interface MapRef {
@@ -70,12 +71,23 @@ const ALERT_ICONS: Record<string, string> = {
   JAM: "/icons/object-on-road.svg",
 };
 
-// Speed camera icons
 const CAMERA_ICONS: Record<string, string> = {
   speed_camera: "/icons/speed-camera.svg",
   red_light_camera: "/icons/red-light-camera.svg",
-  average_speed_camera: "/icons/speed-camera.svg", // Use same icon as speed camera
+  average_speed_camera: "/icons/speed-camera.svg",
 };
+
+const CAMERA_SOURCE_ATTRIBUTION: Record<string, string> = {
+  osm: "Data © OpenStreetMap contributors",
+  chicago: "Data: City of Chicago",
+  dc: "Data: DC DDOT",
+  dgt: "Datos: DGT (CC-BY)",
+  france: "Données: Ministère de l'Intérieur (Licence Ouverte 2.0)",
+  lisboa: "Dados: Câmara Municipal de Lisboa (CC0)",
+};
+
+// Keep marker count sane in dense cities; the API already caps per-request.
+const MAX_CAMERA_MARKERS = 300;
 
 // Severity order for clustering (higher = more severe)
 const ALERT_SEVERITY: Record<string, number> = {
@@ -103,18 +115,18 @@ function clusterAlerts(
   const used = new Set<string>();
 
   for (const alert of alerts) {
-    if (used.has(alert.uuid)) continue;
+    if (used.has(alert.id)) continue;
 
     // Find all alerts within radius
     const nearby = alerts.filter((other) => {
-      if (used.has(other.uuid)) return false;
+      if (used.has(other.id)) return false;
       const dx = alert.location.x - other.location.x;
       const dy = alert.location.y - other.location.y;
       return Math.sqrt(dx * dx + dy * dy) < clusterRadius;
     });
 
     // Mark all as used
-    nearby.forEach((a) => used.add(a.uuid));
+    nearby.forEach((a) => used.add(a.id));
 
     // Calculate center
     const centerX = nearby.reduce((sum, a) => sum + a.location.x, 0) / nearby.length;
@@ -153,147 +165,60 @@ function getAngleDiff(from: number, to: number): number {
   return diff > 180 ? diff - 360 : diff;
 }
 
-// Calculate night overlay opacity based on time of day (0 = no overlay, 1 = full dark)
-// Uses a smooth curve: darkest at midnight, brightest at noon
-function getNightOverlayOpacity(): number {
-  const hour = new Date().getHours();
-  const minute = new Date().getMinutes();
-  const timeDecimal = hour + minute / 60;
-  
-  // Map time to darkness level:
-  // 0-5am: dark (0.4-0.3)
-  // 5-7am: sunrise transition (0.3-0)
-  // 7am-5pm: day (0)
-  // 5-7pm: sunset transition (0-0.2)
-  // 7-10pm: evening (0.2-0.35)
-  // 10pm-midnight: night (0.35-0.4)
-  
-  if (timeDecimal >= 7 && timeDecimal < 17) {
-    // Daytime: no overlay
-    return 0;
-  } else if (timeDecimal >= 5 && timeDecimal < 7) {
-    // Sunrise: fade from dark to light
-    const progress = (timeDecimal - 5) / 2;
-    return 0.3 * (1 - progress);
-  } else if (timeDecimal >= 17 && timeDecimal < 19) {
-    // Sunset: fade from light to dark
-    const progress = (timeDecimal - 17) / 2;
-    return 0.2 * progress;
-  } else if (timeDecimal >= 19 && timeDecimal < 22) {
-    // Evening: gradually darker
-    const progress = (timeDecimal - 19) / 3;
-    return 0.2 + 0.15 * progress;
-  } else if (timeDecimal >= 22 || timeDecimal < 2) {
-    // Late night: darkest
-    return 0.4;
-  } else {
-    // Early morning (2-5am): slightly lighter than midnight
-    const progress = (timeDecimal - 2) / 3;
-    return 0.4 - 0.1 * progress;
-  }
-}
-
-// Hide POI and place labels from the map
-function hidePlaceLabels(mapInstance: mapboxgl.Map) {
-  const style = mapInstance.getStyle();
-  if (!style || !style.layers) return;
-
-  // Layer patterns to hide (POIs, places, landmarks)
-  const labelsToHide = [
-    'poi-label',
-    'transit-label', 
-    'place-label',
-    'settlement-label',
-    'settlement-subdivision-label',
-    'airport-label',
-    'natural-point-label',
-    'water-point-label',
-    'waterway-label',
-  ];
-
-  style.layers.forEach((layer) => {
-    // Check if layer ID contains any of the label patterns
-    const shouldHide = labelsToHide.some(pattern => 
-      layer.id.includes(pattern)
-    );
-    
-    if (shouldHide && mapInstance.getLayer(layer.id)) {
-      mapInstance.setLayoutProperty(layer.id, 'visibility', 'none');
-    }
-  });
-}
-
 export const Map = forwardRef<MapRef, MapProps>(function Map(
   {
     center = [-122.4194, 37.7749],
     zoom = 13,
     isDarkMode = false,
+    styleUrl = OPENFREEMAP_STYLES[DEFAULT_MAP_STYLE].url,
+    satelliteTilesUrl,
+    satelliteAttribution,
+    satelliteMaxZoom = 19,
     alerts = [],
     speedCameras = [],
+    unitSystem = "imperial",
+    onReportVote,
     onBoundsChange,
     onCenteredChange,
-    onLongPress,
-    pinLocation,
     route,
     routes = [],
     selectedRouteIndex = 0,
     userLocation,
     followMode = false,
-    showTraffic = false,
-    useSatellite = false,
     showAvatarPulse = true,
     showAlertRadius = false,
     alertRadiusMeters = 500,
     debugTileBounds,
-    use3DMode = false,
   },
   ref
 ) {
   const mapContainer = useRef<HTMLDivElement>(null);
-  const map = useRef<mapboxgl.Map | null>(null);
+  const map = useRef<maplibregl.Map | null>(null);
   // Use Maps for incremental marker updates (key = unique ID)
-  const markersRef = useRef<globalThis.Map<string, mapboxgl.Marker>>(new globalThis.Map());
-  const cameraMarkersRef = useRef<globalThis.Map<string, mapboxgl.Marker>>(new globalThis.Map());
-  const userMarkerRef = useRef<mapboxgl.Marker | null>(null);
+  const markersRef = useRef<globalThis.Map<string, maplibregl.Marker>>(new globalThis.Map());
+  const cameraMarkersRef = useRef<globalThis.Map<string, maplibregl.Marker>>(new globalThis.Map());
+  const userMarkerRef = useRef<maplibregl.Marker | null>(null);
   const userMarkerElRef = useRef<HTMLDivElement | null>(null);
-  const pinMarkerRef = useRef<mapboxgl.Marker | null>(null);
   const [mapLoaded, setMapLoaded] = useState(false);
-  const [nightOverlayOpacity, setNightOverlayOpacity] = useState(0);
-  const initialCenterSet = useRef(false);
   const isFollowMode = useRef(followMode);
-  
+
   // Track if we should auto-center (user hasn't panned away)
   const isAutoCentering = useRef(true);
   const userInteractingRef = useRef(false);
   const isZoomingRef = useRef(false);
-  
-  // Track showTraffic prop for use in callbacks (closure-safe)
-  const showTrafficPropRef = useRef(showTraffic);
-  
-  // Track 3D mode prop for use in callbacks
-  const use3DModePropRef = useRef(use3DMode);
-  
-  // Track isDarkMode for use in callbacks
-  const isDarkModeRef = useRef(isDarkMode);
-  
-  // Long press handling
-  const longPressTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const longPressStartRef = useRef<{ x: number; y: number } | null>(null);
-  const LONG_PRESS_DURATION = 500; // ms
-  const LONG_PRESS_MOVE_THRESHOLD = 10; // pixels
-  
+
   // Animation state for smooth interpolation
   const animationRef = useRef<number | null>(null);
   const currentPositionRef = useRef<{ lng: number; lat: number } | null>(null);
   const targetPositionRef = useRef<{ lng: number; lat: number } | null>(null);
   const currentHeadingRef = useRef<number>(0);
   const targetHeadingRef = useRef<number>(0);
-  
+
   // Animation speed config
   const POSITION_LERP_SPEED = 0.15; // How fast to interpolate position (0-1, higher = faster)
   const HEADING_LERP_SPEED = 0.15; // How fast to interpolate heading
   const CAMERA_FOLLOW_SPEED = 0.12; // How fast camera follows (increased for snappier tracking)
-  
+
   // Speed-based zoom config
   const lastSpeedRef = useRef<number | null>(null);
   const speedZoomTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -305,7 +230,7 @@ export const Map = forwardRef<MapRef, MapProps>(function Map(
   // Update follow mode ref when prop changes
   useEffect(() => {
     isFollowMode.current = followMode;
-    
+
     if (map.current && mapLoaded) {
       if (followMode) {
         // Enable rotation when in follow mode
@@ -326,7 +251,7 @@ export const Map = forwardRef<MapRef, MapProps>(function Map(
       // Re-enable auto-centering when user clicks recenter
       isAutoCentering.current = true;
       onCenteredChange?.(true);
-      
+
       map.current?.flyTo({
         center: [lng, lat],
         zoom: 15, // Reset to default zoom level
@@ -370,7 +295,7 @@ export const Map = forwardRef<MapRef, MapProps>(function Map(
       // Disable auto-centering when navigating to a destination
       isAutoCentering.current = false;
       onCenteredChange?.(false);
-      
+
       map.current?.flyTo({
         center: [lng, lat],
         zoom: 16,
@@ -394,20 +319,20 @@ export const Map = forwardRef<MapRef, MapProps>(function Map(
       // Smoothly interpolate position
       const newLng = lerp(current.lng, target.lng, POSITION_LERP_SPEED);
       const newLat = lerp(current.lat, target.lat, POSITION_LERP_SPEED);
-      
+
       // Only update if there's meaningful change
       const distChange = Math.abs(newLng - current.lng) + Math.abs(newLat - current.lat);
       if (distChange > 0.0000001) {
         currentPositionRef.current = { lng: newLng, lat: newLat };
         userMarkerRef.current.setLngLat([newLng, newLat]);
-        
+
         // Smooth camera follow when auto-centering is enabled and user isn't interacting
         // Skip if user is dragging or zooming to avoid fighting with map interactions
         if (isAutoCentering.current && !userInteractingRef.current && !isZoomingRef.current && map.current) {
           const mapCenter = map.current.getCenter();
           const targetCenterLng = lerp(mapCenter.lng, newLng, CAMERA_FOLLOW_SPEED);
           const targetCenterLat = lerp(mapCenter.lat, newLat, CAMERA_FOLLOW_SPEED);
-          
+
           map.current.setCenter([targetCenterLng, targetCenterLat]);
         }
       }
@@ -417,29 +342,27 @@ export const Map = forwardRef<MapRef, MapProps>(function Map(
     const targetHeading = targetHeadingRef.current;
     const currentHeading = currentHeadingRef.current;
     const headingDiff = getAngleDiff(currentHeading, targetHeading);
-    
+
     if (Math.abs(headingDiff) > 0.5) {
       const newHeading = normalizeAngle(currentHeading + headingDiff * HEADING_LERP_SPEED);
       currentHeadingRef.current = newHeading;
     }
-    
+
     // Update avatar rotation based on mode
     if (userMarkerElRef.current) {
       const avatarEl = userMarkerElRef.current.querySelector('.user-avatar') as HTMLElement;
       if (avatarEl) {
-        // In 3D mode, tilt the avatar forward to match map perspective (60deg pitch = ~45deg tilt looks good)
-        const tilt3D = use3DModeRef.current ? 'rotateX(45deg)' : '';
-        
         if (isFollowMode.current) {
           // In follow mode: avatar points UP, map rotates
-          avatarEl.style.transform = `translate(-50%, -50%) ${tilt3D} rotate(0deg)`;
+          avatarEl.style.transform = `translate(-50%, -50%) rotate(0deg)`;
         } else {
           // In north-up mode: avatar rotates to show heading
-          avatarEl.style.transform = `translate(-50%, -50%) ${tilt3D} rotate(${currentHeadingRef.current}deg)`;
+          avatarEl.style.transform = `translate(-50%, -50%) rotate(${currentHeadingRef.current}deg)`;
         }
       }
+
     }
-    
+
     // In follow mode, rotate the map bearing
     if (isFollowMode.current && map.current && !userInteractingRef.current) {
       const currentBearing = map.current.getBearing();
@@ -467,28 +390,28 @@ export const Map = forwardRef<MapRef, MapProps>(function Map(
   // When driving faster, zoom out for more context; when slower, zoom in for detail
   useEffect(() => {
     if (!map.current || !mapLoaded || !isAutoCentering.current) return;
-    
+
     const currentSpeed = userLocation?.speed;
     if (currentSpeed === null || currentSpeed === undefined) return;
-    
+
     const lastSpeed = lastSpeedRef.current;
-    
+
     // Initialize last speed on first reading
     if (lastSpeed === null) {
       lastSpeedRef.current = currentSpeed;
       return;
     }
-    
+
     // Determine if we crossed a speed threshold
     const wasSlowDriving = lastSpeed < SPEED_THRESHOLD_LOW;
     const isSlowDriving = currentSpeed < SPEED_THRESHOLD_LOW;
     const wasFastDriving = lastSpeed >= SPEED_THRESHOLD_HIGH;
     const isFastDriving = currentSpeed >= SPEED_THRESHOLD_HIGH;
-    
+
     // Check for threshold crossings
     let shouldZoomOut = false;
     let shouldZoomIn = false;
-    
+
     // Transition from slow to medium/fast -> zoom out
     if (wasSlowDriving && !isSlowDriving) {
       shouldZoomOut = true;
@@ -505,33 +428,33 @@ export const Map = forwardRef<MapRef, MapProps>(function Map(
     else if (!wasSlowDriving && isSlowDriving) {
       shouldZoomIn = true;
     }
-    
+
     // Update last speed
     lastSpeedRef.current = currentSpeed;
-    
+
     // Only adjust if threshold was crossed
     if (!shouldZoomOut && !shouldZoomIn) return;
-    
+
     // Clear any pending zoom adjustment
     if (speedZoomTimeoutRef.current) {
       clearTimeout(speedZoomTimeoutRef.current);
     }
-    
+
     // Debounce the zoom adjustment to prevent rapid changes
     speedZoomTimeoutRef.current = setTimeout(() => {
       if (!map.current || !isAutoCentering.current || userInteractingRef.current || isZoomingRef.current) return;
-      
+
       const currentZoom = map.current.getZoom();
-      const targetZoom = shouldZoomOut 
+      const targetZoom = shouldZoomOut
         ? Math.max(currentZoom - ZOOM_ADJUSTMENT_AMOUNT, 11) // Min zoom ~11 for highway context
         : Math.min(currentZoom + ZOOM_ADJUSTMENT_AMOUNT, 17); // Max zoom ~17 for residential detail
-      
+
       map.current.easeTo({
         zoom: targetZoom,
         duration: 1000,
       });
     }, SPEED_ZOOM_DEBOUNCE);
-    
+
     return () => {
       if (speedZoomTimeoutRef.current) {
         clearTimeout(speedZoomTimeoutRef.current);
@@ -539,84 +462,60 @@ export const Map = forwardRef<MapRef, MapProps>(function Map(
     };
   }, [userLocation?.speed, mapLoaded]);
 
-  // Update night overlay opacity based on time of day (satellite mode only)
-  useEffect(() => {
-    if (!useSatellite) {
-      setNightOverlayOpacity(0);
-      return;
-    }
-
-    // Set initial value
-    setNightOverlayOpacity(getNightOverlayOpacity());
-
-    // Update every minute
-    const interval = setInterval(() => {
-      setNightOverlayOpacity(getNightOverlayOpacity());
-    }, 60000);
-
-    return () => clearInterval(interval);
-  }, [useSatellite]);
-
   // Initialize map
   useEffect(() => {
     if (!mapContainer.current || map.current) return;
 
-    mapboxgl.accessToken = MAPBOX_TOKEN;
+    const initialStyle: string | maplibregl.StyleSpecification = satelliteTilesUrl
+      ? {
+          version: 8,
+          name: "TeslaNav Satellite",
+          sources: {
+            "satellite-imagery": {
+              type: "raster",
+              tiles: [satelliteTilesUrl],
+              tileSize: 256,
+              maxzoom: satelliteMaxZoom,
+              attribution: satelliteAttribution,
+            },
+          },
+          layers: [
+            {
+              id: "satellite-background",
+              type: "background",
+              paint: { "background-color": "#050505" },
+            },
+            {
+              id: "satellite-imagery",
+              type: "raster",
+              source: "satellite-imagery",
+              paint: {
+                "raster-fade-duration": 0,
+                "raster-saturation": -0.05,
+                "raster-contrast": 0.08,
+                "raster-brightness-max": isDarkMode ? 0.56 : 1,
+              },
+            },
+          ],
+        }
+      : styleUrl;
 
-    // Determine initial style
-    let initialStyle: string;
-    if (useSatellite) {
-      // Use standard satellite with streets overlay for better detail
-      initialStyle = "mapbox://styles/mapbox/satellite-streets-v12";
-    } else {
-      initialStyle = isDarkMode
-        ? "mapbox://styles/mapbox/dark-v11"
-        : "mapbox://styles/mapbox/light-v11";
-    }
-
-    map.current = new mapboxgl.Map({
+    map.current = new maplibregl.Map({
       container: mapContainer.current,
       style: initialStyle,
       center,
       zoom,
-      attributionControl: false,
-      pitchWithRotate: use3DMode, // Allow pitch control in 3D mode
+      attributionControl: { compact: true },
       dragRotate: false, // Start with north up
-      pitch: use3DMode ? 60 : 0, // Set initial pitch for 3D mode
-      // Route tile requests through our caching proxy to reduce Mapbox costs
-      transformRequest: (url, resourceType) => {
-        // Only proxy tile requests, not style/sprite/glyph JSON files
-        if (
-          resourceType === "Tile" &&
-          (url.includes("api.mapbox.com") || url.includes("tiles.mapbox.com"))
-        ) {
-          // Must use absolute URL for Mapbox GL
-          const proxyUrl = `${window.location.origin}/api/tiles?url=${encodeURIComponent(url)}`;
-          return { url: proxyUrl };
-        }
-        // Let other requests pass through normally
-        return { url };
-      },
+      pitch: 0,
     });
 
     map.current.on("load", () => {
       setMapLoaded(true);
 
-      // Hide POI and place labels
-      if (map.current) {
-        hidePlaceLabels(map.current);
-      }
-
       if (map.current && onBoundsChange) {
         const bounds = map.current.getBounds();
         if (bounds) {
-          // RQ: Log viewport coords for testing (remove later)
-          console.log("[Viewport Bounds]", {
-            north: bounds.getNorth(),
-            south: bounds.getSouth(),
-            east: bounds.getEast(),
-            west: bounds.getWest(),
-          });
           onBoundsChange({
             north: bounds.getNorth(),
             south: bounds.getSouth(),
@@ -626,78 +525,6 @@ export const Map = forwardRef<MapRef, MapProps>(function Map(
           });
         }
       }
-
-      // Add traffic layer immediately on load if enabled
-      // This is the most reliable place because we KNOW the style is fully loaded
-      // Use ref to get current value (not the stale closure value)
-      const addInitialTraffic = () => {
-        if (!map.current || !showTrafficPropRef.current) return;
-        try {
-          if (!map.current.getSource("mapbox-traffic")) {
-            map.current.addSource("mapbox-traffic", {
-              type: "vector",
-              url: "mapbox://mapbox.mapbox-traffic-v1",
-            });
-          }
-          if (!map.current.getLayer("traffic-layer")) {
-            map.current.addLayer({
-              id: "traffic-layer",
-              type: "line",
-              source: "mapbox-traffic",
-              "source-layer": "traffic",
-              filter: [
-                "in",
-                ["get", "congestion"],
-                ["literal", ["moderate", "heavy", "severe"]]
-              ],
-              paint: {
-                "line-width": 3,
-                "line-color": [
-                  "match",
-                  ["get", "congestion"],
-                  "moderate", "#facc15",
-                  "heavy", "#f97316",
-                  "severe", "#ef4444",
-                  "#f97316"
-                ],
-                "line-opacity": 0.85,
-              },
-            });
-          }
-        } catch (e) {
-          console.log("Error adding initial traffic layer:", e);
-        }
-      };
-      
-      // Try immediately
-      addInitialTraffic();
-      
-      // Also try after a short delay as fallback (handles edge cases with ref timing)
-      setTimeout(addInitialTraffic, 200);
-
-      // Add 3D terrain if enabled
-      const addInitial3DTerrain = () => {
-        if (!map.current || !use3DModePropRef.current) return;
-        try {
-          if (!map.current.getSource("mapbox-dem")) {
-            map.current.addSource("mapbox-dem", {
-              type: "raster-dem",
-              url: "mapbox://mapbox.mapbox-terrain-dem-v1",
-              tileSize: 512,
-              maxzoom: 14,
-            });
-          }
-          map.current.setTerrain({ source: "mapbox-dem", exaggeration: 1.5 });
-        } catch (e) {
-          console.log("Error adding 3D terrain:", e);
-        }
-      };
-      
-      // Try immediately
-      addInitial3DTerrain();
-      
-      // Also try after a short delay as fallback
-      setTimeout(addInitial3DTerrain, 200);
     });
 
     // Detect when user starts interacting (pan/drag)
@@ -757,13 +584,6 @@ export const Map = forwardRef<MapRef, MapProps>(function Map(
       if (map.current && onBoundsChange) {
         const bounds = map.current.getBounds();
         if (bounds) {
-          // RQ: Log viewport coords for testing (remove later)
-          console.log("[Viewport Bounds]", {
-            north: bounds.getNorth(),
-            south: bounds.getSouth(),
-            east: bounds.getEast(),
-            west: bounds.getWest(),
-          });
           onBoundsChange({
             north: bounds.getNorth(),
             south: bounds.getSouth(),
@@ -779,497 +599,27 @@ export const Map = forwardRef<MapRef, MapProps>(function Map(
       map.current?.remove();
       map.current = null;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  // Long press handler for "navigate to" functionality
-  useEffect(() => {
-    if (!map.current || !mapLoaded || !onLongPress) return;
-
-    const mapInstance = map.current;
-    const canvas = mapInstance.getCanvasContainer();
-
-    const clearLongPress = () => {
-      if (longPressTimerRef.current) {
-        clearTimeout(longPressTimerRef.current);
-        longPressTimerRef.current = null;
-      }
-      longPressStartRef.current = null;
-    };
-
-    const handleTouchStart = (e: TouchEvent) => {
-      if (e.touches.length !== 1) {
-        clearLongPress();
-        return;
-      }
-
-      const touch = e.touches[0];
-      longPressStartRef.current = { x: touch.clientX, y: touch.clientY };
-
-      longPressTimerRef.current = setTimeout(() => {
-        if (longPressStartRef.current && map.current) {
-          // Get the coordinates from the touch point
-          const point = map.current.unproject([
-            touch.clientX - canvas.getBoundingClientRect().left,
-            touch.clientY - canvas.getBoundingClientRect().top,
-          ]);
-          
-          // Trigger haptic feedback if available
-          if (navigator.vibrate) {
-            navigator.vibrate(50);
-          }
-          
-          onLongPress(point.lng, point.lat, touch.clientX, touch.clientY);
-        }
-        clearLongPress();
-      }, LONG_PRESS_DURATION);
-    };
-
-    const handleTouchMove = (e: TouchEvent) => {
-      if (!longPressStartRef.current || e.touches.length !== 1) {
-        clearLongPress();
-        return;
-      }
-
-      const touch = e.touches[0];
-      const dx = touch.clientX - longPressStartRef.current.x;
-      const dy = touch.clientY - longPressStartRef.current.y;
-      const distance = Math.sqrt(dx * dx + dy * dy);
-
-      if (distance > LONG_PRESS_MOVE_THRESHOLD) {
-        clearLongPress();
-      }
-    };
-
-    const handleTouchEnd = () => {
-      clearLongPress();
-    };
-
-    // Also support right-click on desktop
-    const handleContextMenu = (e: MouseEvent) => {
-      e.preventDefault();
-      if (map.current) {
-        const point = map.current.unproject([
-          e.clientX - canvas.getBoundingClientRect().left,
-          e.clientY - canvas.getBoundingClientRect().top,
-        ]);
-        onLongPress(point.lng, point.lat, e.clientX, e.clientY);
-      }
-    };
-
-    canvas.addEventListener("touchstart", handleTouchStart, { passive: true });
-    canvas.addEventListener("touchmove", handleTouchMove, { passive: true });
-    canvas.addEventListener("touchend", handleTouchEnd);
-    canvas.addEventListener("touchcancel", handleTouchEnd);
-    canvas.addEventListener("contextmenu", handleContextMenu);
-
-    return () => {
-      clearLongPress();
-      canvas.removeEventListener("touchstart", handleTouchStart);
-      canvas.removeEventListener("touchmove", handleTouchMove);
-      canvas.removeEventListener("touchend", handleTouchEnd);
-      canvas.removeEventListener("touchcancel", handleTouchEnd);
-      canvas.removeEventListener("contextmenu", handleContextMenu);
-    };
-  }, [mapLoaded, onLongPress]);
-
-  // Auto-center on user location (only once on initial load)
-  useEffect(() => {
-    if (!map.current || !mapLoaded || !userLocation || initialCenterSet.current) return;
-
-    map.current.flyTo({
-      center: [userLocation.longitude, userLocation.latitude],
-      zoom: 15,
-      duration: 1000,
-    });
-    initialCenterSet.current = true;
-  }, [userLocation, mapLoaded]);
 
   // Update target position for animation when userLocation changes
   useEffect(() => {
     if (!userLocation) return;
-    
+
     const newTarget = { lng: userLocation.longitude, lat: userLocation.latitude };
     targetPositionRef.current = newTarget;
-    
+
     // Initialize current position if not set
     if (!currentPositionRef.current) {
       currentPositionRef.current = newTarget;
     }
-    
+
     // Update target heading
     const heading = userLocation.effectiveHeading ?? userLocation.heading ?? null;
     if (heading !== null) {
       targetHeadingRef.current = heading;
     }
   }, [userLocation]);
-
-  // Track initial style to avoid unnecessary setStyle calls
-  const initialStyleRef = useRef<string | null>(null);
-
-  // Update map style when dark mode or satellite mode changes
-  useEffect(() => {
-    if (!map.current || !mapLoaded) return;
-
-    let currentStyle: string;
-    if (useSatellite) {
-      // Use standard satellite with streets overlay for better detail
-      currentStyle = "mapbox://styles/mapbox/satellite-streets-v12";
-    } else {
-      currentStyle = isDarkMode
-        ? "mapbox://styles/mapbox/dark-v11"
-        : "mapbox://styles/mapbox/light-v11";
-    }
-
-    // Skip setStyle if this is the initial load and style hasn't changed
-    // This prevents an unnecessary style reload that causes timing issues
-    if (initialStyleRef.current === null) {
-      initialStyleRef.current = currentStyle;
-      // Initial style was set in the constructor, just hide labels
-      if (map.current.isStyleLoaded()) {
-        hidePlaceLabels(map.current);
-      } else {
-        map.current.once("style.load", () => {
-          if (map.current) {
-            hidePlaceLabels(map.current);
-          }
-        });
-      }
-      return;
-    }
-
-    // Only call setStyle if the style actually changed
-    if (currentStyle !== initialStyleRef.current) {
-      initialStyleRef.current = currentStyle;
-      map.current.setStyle(currentStyle);
-      
-      // Hide labels after style loads
-      map.current.once("style.load", () => {
-        if (map.current) {
-          hidePlaceLabels(map.current);
-        }
-      });
-    }
-  }, [isDarkMode, mapLoaded, useSatellite]);
-
-  // Track showTraffic in a ref so style.load handler always has current value
-  const showTrafficRef = useRef(showTraffic);
-  useEffect(() => {
-    showTrafficRef.current = showTraffic;
-    showTrafficPropRef.current = showTraffic;
-  }, [showTraffic]);
-
-  // Track use3DMode in a ref so style.load handler always has current value
-  const use3DModeRef = useRef(use3DMode);
-  useEffect(() => {
-    use3DModeRef.current = use3DMode;
-    use3DModePropRef.current = use3DMode;
-  }, [use3DMode]);
-
-  // Track isDarkMode in ref for use in callbacks
-  useEffect(() => {
-    isDarkModeRef.current = isDarkMode;
-  }, [isDarkMode]);
-
-  // Set up persistent style.load listener for traffic layer (runs once when map loads)
-  useEffect(() => {
-    if (!map.current || !mapLoaded) return;
-
-    const mapInstance = map.current;
-
-    const addTrafficLayer = () => {
-      if (!mapInstance.isStyleLoaded()) return;
-      
-      try {
-        if (!mapInstance.getSource("mapbox-traffic")) {
-          mapInstance.addSource("mapbox-traffic", {
-            type: "vector",
-            url: "mapbox://mapbox.mapbox-traffic-v1",
-          });
-        }
-
-        if (!mapInstance.getLayer("traffic-layer")) {
-          mapInstance.addLayer({
-            id: "traffic-layer",
-            type: "line",
-            source: "mapbox-traffic",
-            "source-layer": "traffic",
-            filter: [
-              "in",
-              ["get", "congestion"],
-              ["literal", ["moderate", "heavy", "severe"]]
-            ],
-            paint: {
-              "line-width": 3,
-              "line-color": [
-                "match",
-                ["get", "congestion"],
-                "moderate", "#facc15", 
-                "heavy", "#f97316",
-                "severe", "#ef4444",
-                "#f97316"
-              ],
-              "line-opacity": 0.85,
-            },
-          });
-        }
-      } catch (e) {
-        console.log("Error adding traffic layer:", e);
-      }
-    };
-
-    // Handler for when style loads/changes - re-add traffic if enabled
-    const handleStyleLoad = () => {
-      if (showTrafficRef.current) {
-        // Small delay to ensure style is fully ready
-        setTimeout(() => addTrafficLayer(), 100);
-      }
-    };
-
-    // Listen for all style changes
-    mapInstance.on("style.load", handleStyleLoad);
-
-    // IMPORTANT: Also add traffic now if style is already loaded and traffic is enabled
-    // This handles the initial load case where style.load may have already fired
-    if (showTrafficRef.current && mapInstance.isStyleLoaded()) {
-      addTrafficLayer();
-    }
-
-    return () => {
-      mapInstance.off("style.load", handleStyleLoad);
-    };
-  }, [mapLoaded]);
-
-  // Toggle traffic layer on/off based on showTraffic prop
-  useEffect(() => {
-    if (!map.current || !mapLoaded) return;
-
-    const mapInstance = map.current;
-
-    const addTrafficLayer = () => {
-      if (!mapInstance.isStyleLoaded()) return;
-      
-      try {
-        if (!mapInstance.getSource("mapbox-traffic")) {
-          mapInstance.addSource("mapbox-traffic", {
-            type: "vector",
-            url: "mapbox://mapbox.mapbox-traffic-v1",
-          });
-        }
-
-        if (!mapInstance.getLayer("traffic-layer")) {
-          mapInstance.addLayer({
-            id: "traffic-layer",
-            type: "line",
-            source: "mapbox-traffic",
-            "source-layer": "traffic",
-            filter: [
-              "in",
-              ["get", "congestion"],
-              ["literal", ["moderate", "heavy", "severe"]]
-            ],
-            paint: {
-              "line-width": 3,
-              "line-color": [
-                "match",
-                ["get", "congestion"],
-                "moderate", "#facc15", 
-                "heavy", "#f97316",
-                "severe", "#ef4444",
-                "#f97316"
-              ],
-              "line-opacity": 0.85,
-            },
-          });
-        }
-      } catch (e) {
-        console.log("Error adding traffic layer:", e);
-      }
-    };
-
-    const removeTrafficLayer = () => {
-      try {
-        if (mapInstance.getLayer("traffic-layer")) {
-          mapInstance.removeLayer("traffic-layer");
-        }
-        if (mapInstance.getSource("mapbox-traffic")) {
-          mapInstance.removeSource("mapbox-traffic");
-        }
-      } catch (e) {
-        console.log("Error removing traffic layer:", e);
-      }
-    };
-
-    if (showTraffic) {
-      if (mapInstance.isStyleLoaded()) {
-        addTrafficLayer();
-      }
-    } else {
-      if (mapInstance.isStyleLoaded()) {
-        removeTrafficLayer();
-      }
-    }
-  }, [showTraffic, mapLoaded]);
-
-  // Toggle 3D terrain on/off based on use3DMode prop
-  useEffect(() => {
-    if (!map.current || !mapLoaded) return;
-
-    const mapInstance = map.current;
-
-    const add3DTerrain = () => {
-      if (!mapInstance.isStyleLoaded()) return;
-      
-      try {
-        // Add terrain elevation
-        if (!mapInstance.getSource("mapbox-dem")) {
-          mapInstance.addSource("mapbox-dem", {
-            type: "raster-dem",
-            url: "mapbox://mapbox.mapbox-terrain-dem-v1",
-            tileSize: 512,
-            maxzoom: 14,
-          });
-        }
-        mapInstance.setTerrain({ source: "mapbox-dem", exaggeration: 1.5 });
-        
-        // Add 3D buildings layer
-        if (!mapInstance.getLayer("3d-buildings")) {
-          // Find the first symbol layer to insert buildings below labels
-          const layers = mapInstance.getStyle().layers;
-          let labelLayerId: string | undefined;
-          for (const layer of layers) {
-            if (layer.type === "symbol" && layer.layout?.["text-field"]) {
-              labelLayerId = layer.id;
-              break;
-            }
-          }
-          
-          mapInstance.addLayer(
-            {
-              id: "3d-buildings",
-              source: "composite",
-              "source-layer": "building",
-              filter: ["==", "extrude", "true"],
-              type: "fill-extrusion",
-              minzoom: 15,
-              paint: {
-                "fill-extrusion-color": isDarkMode ? "#242424" : "#ddd",
-                "fill-extrusion-height": ["get", "height"],
-                "fill-extrusion-base": ["get", "min_height"],
-                "fill-extrusion-opacity": 0.8,
-              },
-            },
-            labelLayerId
-          );
-        }
-        
-        // Set pitch for 3D view
-        mapInstance.easeTo({ pitch: 60, duration: 500 });
-      } catch (e) {
-        console.log("Error adding 3D terrain:", e);
-      }
-    };
-
-    const remove3DTerrain = () => {
-      try {
-        // Remove terrain first
-        mapInstance.setTerrain(null);
-        // Remove 3D buildings layer
-        if (mapInstance.getLayer("3d-buildings")) {
-          mapInstance.removeLayer("3d-buildings");
-        }
-        // Reset pitch to flat
-        mapInstance.easeTo({ pitch: 0, duration: 500 });
-      } catch (e) {
-        console.log("Error removing 3D terrain:", e);
-      }
-    };
-
-    if (use3DMode) {
-      if (mapInstance.isStyleLoaded()) {
-        add3DTerrain();
-      }
-    } else {
-      if (mapInstance.isStyleLoaded()) {
-        remove3DTerrain();
-      }
-    }
-  }, [use3DMode, mapLoaded]);
-
-  // Set up persistent style.load listener for 3D terrain (runs when style changes)
-  useEffect(() => {
-    if (!map.current || !mapLoaded) return;
-
-    const mapInstance = map.current;
-
-    const add3DTerrainLayer = () => {
-      if (!mapInstance.isStyleLoaded()) return;
-      
-      try {
-        // Add terrain
-        if (!mapInstance.getSource("mapbox-dem")) {
-          mapInstance.addSource("mapbox-dem", {
-            type: "raster-dem",
-            url: "mapbox://mapbox.mapbox-terrain-dem-v1",
-            tileSize: 512,
-            maxzoom: 14,
-          });
-        }
-        mapInstance.setTerrain({ source: "mapbox-dem", exaggeration: 1.5 });
-        
-        // Add 3D buildings
-        if (!mapInstance.getLayer("3d-buildings")) {
-          const layers = mapInstance.getStyle().layers;
-          let labelLayerId: string | undefined;
-          for (const layer of layers) {
-            if (layer.type === "symbol" && layer.layout?.["text-field"]) {
-              labelLayerId = layer.id;
-              break;
-            }
-          }
-          
-          mapInstance.addLayer(
-            {
-              id: "3d-buildings",
-              source: "composite",
-              "source-layer": "building",
-              filter: ["==", "extrude", "true"],
-              type: "fill-extrusion",
-              minzoom: 15,
-              paint: {
-                "fill-extrusion-color": isDarkModeRef.current ? "#242424" : "#ddd",
-                "fill-extrusion-height": ["get", "height"],
-                "fill-extrusion-base": ["get", "min_height"],
-                "fill-extrusion-opacity": 0.8,
-              },
-            },
-            labelLayerId
-          );
-        }
-      } catch (e) {
-        console.log("Error adding 3D terrain layer:", e);
-      }
-    };
-
-    // Handler for when style loads/changes - re-add terrain if enabled
-    const handleStyleLoad = () => {
-      if (use3DModeRef.current) {
-        // Small delay to ensure style is fully ready
-        setTimeout(() => add3DTerrainLayer(), 100);
-      }
-    };
-
-    // Listen for all style changes
-    mapInstance.on("style.load", handleStyleLoad);
-
-    // IMPORTANT: Also add terrain now if style is already loaded and 3D mode is enabled
-    if (use3DModeRef.current && mapInstance.isStyleLoaded()) {
-      add3DTerrainLayer();
-    }
-
-    return () => {
-      mapInstance.off("style.load", handleStyleLoad);
-    };
-  }, [mapLoaded]);
 
   // Create/update user location marker
   useEffect(() => {
@@ -1282,37 +632,33 @@ export const Map = forwardRef<MapRef, MapProps>(function Map(
       const el = document.createElement("div");
       el.className = "user-marker";
       userMarkerElRef.current = el;
-      
-      // Initial 3D tilt if in 3D mode
-      const initialTilt = use3DMode ? 'rotateX(45deg)' : '';
-      
+
       // Create simple marker - just the avatar that rotates
-      // Add perspective to container for 3D transforms and transform-style for nested 3D
       el.innerHTML = `
-        <div class="user-avatar-container" style="perspective: 100px; transform-style: preserve-3d;">
-          <div class="user-avatar" style="transform: translate(-50%, -50%) ${initialTilt} rotate(${initialHeading}deg); transform-style: preserve-3d;">
+        <div class="user-avatar-container">
+          <div class="user-avatar" style="transform: translate(-50%, -50%) rotate(${initialHeading}deg);">
             <img src="${avatarSrc}" alt="You" />
           </div>
           ${showAvatarPulse ? '<div class="user-avatar-pulse"></div>' : ''}
         </div>
       `;
 
-      userMarkerRef.current = new mapboxgl.Marker({ element: el })
+      userMarkerRef.current = new maplibregl.Marker({ element: el })
         .setLngLat([userLocation.longitude, userLocation.latitude])
         .addTo(map.current);
-        
+
       // Initialize position refs
       currentPositionRef.current = { lng: userLocation.longitude, lat: userLocation.latitude };
       targetPositionRef.current = { lng: userLocation.longitude, lat: userLocation.latitude };
       currentHeadingRef.current = initialHeading;
       targetHeadingRef.current = initialHeading;
     }
-  }, [userLocation, mapLoaded, isDarkMode]);
+  }, [userLocation, mapLoaded, isDarkMode, showAvatarPulse]);
 
   // Update avatar image when dark mode changes
   useEffect(() => {
     if (!userMarkerRef.current) return;
-    
+
     const avatarSrc = isDarkMode ? "/maps-avatar.jpg" : "/maps-avatar-light.jpg";
     const img = userMarkerRef.current.getElement().querySelector("img");
     if (img) {
@@ -1323,12 +669,12 @@ export const Map = forwardRef<MapRef, MapProps>(function Map(
   // Update pulse visibility when setting changes
   useEffect(() => {
     if (!userMarkerElRef.current) return;
-    
+
     const container = userMarkerElRef.current.querySelector('.user-avatar-container');
     if (!container) return;
-    
+
     const existingPulse = container.querySelector('.user-avatar-pulse');
-    
+
     if (showAvatarPulse && !existingPulse) {
       // Add pulse
       const pulse = document.createElement('div');
@@ -1339,21 +685,6 @@ export const Map = forwardRef<MapRef, MapProps>(function Map(
       existingPulse.remove();
     }
   }, [showAvatarPulse]);
-
-  // Update avatar 3D tilt when 3D mode changes
-  useEffect(() => {
-    if (!userMarkerElRef.current) return;
-    
-    const container = userMarkerElRef.current.querySelector('.user-avatar-container') as HTMLElement;
-    if (container) {
-      // Add perspective for 3D transforms
-      container.style.perspective = use3DMode ? '100px' : 'none';
-      container.style.transformStyle = 'preserve-3d';
-    }
-    
-    // The actual tilt transform is applied in the animation loop (animatePosition)
-    // which reads from use3DModeRef, so it will update automatically
-  }, [use3DMode]);
 
   // Alert radius circle (dev mode)
   useEffect(() => {
@@ -1369,18 +700,18 @@ export const Map = forwardRef<MapRef, MapProps>(function Map(
       const coords = [];
       const earthRadius = 6371000; // meters
       const latRad = (lat * Math.PI) / 180;
-      
+
       for (let i = 0; i <= points; i++) {
         const angle = (i / points) * 2 * Math.PI;
         const dx = radiusMeters * Math.cos(angle);
         const dy = radiusMeters * Math.sin(angle);
-        
+
         const newLat = lat + (dy / earthRadius) * (180 / Math.PI);
         const newLng = lng + (dx / (earthRadius * Math.cos(latRad))) * (180 / Math.PI);
-        
+
         coords.push([newLng, newLat]);
       }
-      
+
       return {
         type: "Feature" as const,
         geometry: {
@@ -1417,8 +748,8 @@ export const Map = forwardRef<MapRef, MapProps>(function Map(
     );
 
     // Check if source exists
-    const existingSource = mapInstance.getSource(sourceId) as mapboxgl.GeoJSONSource;
-    
+    const existingSource = mapInstance.getSource(sourceId) as maplibregl.GeoJSONSource | undefined;
+
     if (existingSource) {
       // Update existing source
       existingSource.setData({
@@ -1459,14 +790,9 @@ export const Map = forwardRef<MapRef, MapProps>(function Map(
         },
       });
     }
-
-    // Cleanup on unmount
-    return () => {
-      // Don't remove on every re-render, only when actually unmounting
-    };
   }, [showAlertRadius, alertRadiusMeters, userLocation, mapLoaded]);
 
-  // Cleanup alert radius on unmount or when disabled
+  // Cleanup alert radius on unmount
   useEffect(() => {
     return () => {
       if (!map.current) return;
@@ -1474,7 +800,7 @@ export const Map = forwardRef<MapRef, MapProps>(function Map(
       const sourceId = "alert-radius-source";
       const layerId = "alert-radius-layer";
       const outlineLayerId = "alert-radius-outline";
-      
+
       try {
         if (mapInstance.getLayer(outlineLayerId)) mapInstance.removeLayer(outlineLayerId);
         if (mapInstance.getLayer(layerId)) mapInstance.removeLayer(layerId);
@@ -1489,15 +815,13 @@ export const Map = forwardRef<MapRef, MapProps>(function Map(
   useEffect(() => {
     if (!map.current || !mapLoaded) return;
     const mapInstance = map.current;
-    
+
     const sourceId = "debug-tile-bounds-source";
     const fillLayerId = "debug-tile-bounds-fill";
     const lineLayerId = "debug-tile-bounds-line";
-    const labelLayerId = "debug-tile-bounds-label";
 
     // Remove existing layers and source
     try {
-      if (mapInstance.getLayer(labelLayerId)) mapInstance.removeLayer(labelLayerId);
       if (mapInstance.getLayer(lineLayerId)) mapInstance.removeLayer(lineLayerId);
       if (mapInstance.getLayer(fillLayerId)) mapInstance.removeLayer(fillLayerId);
       if (mapInstance.getSource(sourceId)) mapInstance.removeSource(sourceId);
@@ -1511,17 +835,14 @@ export const Map = forwardRef<MapRef, MapProps>(function Map(
     // Create GeoJSON features for each tile
     const features = debugTileBounds.map((tile, index) => {
       const { bounds, ageMs } = tile;
-      const ageSeconds = Math.round(ageMs / 1000);
       // Color based on age: green (fresh) -> yellow -> red (old)
       const freshness = Math.max(0, 1 - ageMs / 60000); // 0-1, 1 = fresh
-      
+
       return {
         type: "Feature" as const,
         properties: {
           index,
-          ageSeconds,
           freshness,
-          label: `Tile ${index + 1}\n${ageSeconds}s old`,
         },
         geometry: {
           type: "Polygon" as const,
@@ -1581,25 +902,6 @@ export const Map = forwardRef<MapRef, MapProps>(function Map(
         "line-dasharray": [4, 2],
       },
     });
-
-    // Add label layer
-    mapInstance.addLayer({
-      id: labelLayerId,
-      type: "symbol",
-      source: sourceId,
-      layout: {
-        "text-field": ["get", "label"],
-        "text-size": 14,
-        "text-font": ["DIN Pro Bold", "Arial Unicode MS Bold"],
-        "text-anchor": "center",
-        "text-allow-overlap": true,
-      },
-      paint: {
-        "text-color": "#ffffff",
-        "text-halo-color": "#000000",
-        "text-halo-width": 2,
-      },
-    });
   }, [debugTileBounds, mapLoaded]);
 
   // Update alert markers with clustering - incremental updates to prevent popup glitches
@@ -1614,52 +916,43 @@ export const Map = forwardRef<MapRef, MapProps>(function Map(
 
     // Cluster nearby alerts
     const clusters = clusterAlerts(alerts);
-    
+
     // Generate stable IDs for clusters/alerts
     const getClusterId = (cluster: AlertCluster): string => {
       if (cluster.alerts.length === 1) {
-        return cluster.alerts[0].uuid;
+        return cluster.alerts[0].id;
       }
       // For clusters, use sorted UUIDs to create stable ID
-      return `cluster-${cluster.alerts.map(a => a.uuid).sort().join('-')}`;
+      return `cluster-${cluster.alerts.map(a => a.id).sort().join('-')}`;
     };
-    
+
     // Track which markers should exist
     const newMarkerIds = new Set<string>();
-    
-    // Track which marker has an open popup (to preserve it)
-    let openPopupMarkerId: string | null = null;
-    for (const [id, marker] of markersRef.current) {
-      if (marker.getPopup()?.isOpen()) {
-        openPopupMarkerId = id;
-        break;
-      }
-    }
 
     clusters.forEach((cluster) => {
       const markerId = getClusterId(cluster);
       newMarkerIds.add(markerId);
-      
+
       const isCluster = cluster.alerts.length > 1;
       const color = ALERT_COLORS[cluster.mostSevereType] || "#6b7280";
       const icon = ALERT_ICONS[cluster.mostSevereType] || "/icons/hazard.svg";
-      
+
       // Check if marker already exists
       const existingMarker = markersRef.current.get(markerId);
-      
+
       if (existingMarker) {
         // Update position if needed (marker exists, just update location)
         const currentLngLat = existingMarker.getLngLat();
         const targetLng = isCluster ? cluster.center.x : cluster.alerts[0].location.x;
         const targetLat = isCluster ? cluster.center.y : cluster.alerts[0].location.y;
-        
-        if (Math.abs(currentLngLat.lng - targetLng) > 0.00001 || 
+
+        if (Math.abs(currentLngLat.lng - targetLng) > 0.00001 ||
             Math.abs(currentLngLat.lat - targetLat) > 0.00001) {
           existingMarker.setLngLat([targetLng, targetLat]);
         }
         return; // Keep existing marker, don't recreate
       }
-      
+
       // Create new marker
       const el = document.createElement("div");
       el.className = "alert-marker";
@@ -1667,7 +960,7 @@ export const Map = forwardRef<MapRef, MapProps>(function Map(
       if (isCluster) {
         // Cluster marker - minimal bubble with count badge
         const count = cluster.alerts.length;
-        
+
         el.innerHTML = `
           <div class="alert-pin cluster" style="
             position: relative;
@@ -1725,14 +1018,14 @@ export const Map = forwardRef<MapRef, MapProps>(function Map(
           </div>
         `;
 
-        const popup = new mapboxgl.Popup({
+        const popup = new maplibregl.Popup({
           offset: 25,
           closeButton: false,
           maxWidth: "240px",
           className: `alert-popup-container ${isDarkMode ? "dark" : ""}`,
         }).setHTML(popupContent);
 
-        const marker = new mapboxgl.Marker({ element: el, anchor: "center" })
+        const marker = new maplibregl.Marker({ element: el, anchor: "bottom" })
           .setLngLat([cluster.center.x, cluster.center.y])
           .setPopup(popup)
           .addTo(map.current!);
@@ -1741,7 +1034,7 @@ export const Map = forwardRef<MapRef, MapProps>(function Map(
       } else {
         // Single alert marker - minimal bubble
         const alert = cluster.alerts[0];
-        
+
         el.innerHTML = `
           <div class="alert-pin" style="
             position: relative;
@@ -1783,14 +1076,71 @@ export const Map = forwardRef<MapRef, MapProps>(function Map(
           </div>
         `;
 
-        const popup = new mapboxgl.Popup({
+        const popup = new maplibregl.Popup({
           offset: 20,
           closeButton: false,
           maxWidth: "240px",
           className: `alert-popup-container ${isDarkMode ? "dark" : ""}`,
-        }).setHTML(popupContent);
+        });
 
-        const marker = new mapboxgl.Marker({ element: el, anchor: "center" })
+        // First-party reports get "Still there / Gone" voting buttons.
+        const reportId = alert.id.startsWith("alert-user/")
+          ? alert.id.slice("alert-user/".length)
+          : null;
+        if (reportId && onReportVote) {
+          const content = document.createElement("div");
+          content.innerHTML = popupContent;
+          const popupBody = content.querySelector(".alert-popup") ?? content;
+
+          const voteRow = document.createElement("div");
+          voteRow.style.cssText = "display:flex; gap:8px; margin-top:10px;";
+          const status = document.createElement("div");
+          status.style.cssText = `margin-top:10px; font-size:12px; font-weight:600; text-align:center; color:${popupSubtext};`;
+
+          const makeButton = (
+            label: string,
+            vote: "confirm" | "gone",
+            accent: string
+          ) => {
+            const button = document.createElement("button");
+            button.textContent = label;
+            button.style.cssText = `
+              flex:1; padding:9px 8px; border-radius:8px; cursor:pointer;
+              font-size:13px; font-weight:600;
+              border:1px solid ${accent};
+              color:${accent}; background:transparent;
+            `;
+            button.addEventListener("click", async (event) => {
+              event.stopPropagation();
+              for (const child of voteRow.children) {
+                (child as HTMLButtonElement).disabled = true;
+                (child as HTMLElement).style.opacity = "0.4";
+              }
+              const result = await onReportVote(reportId, vote).catch(() => null);
+              status.textContent =
+                result === null
+                  ? "Vote failed — try again later"
+                  : vote === "confirm"
+                    ? "Thanks — report renewed"
+                    : result.removed
+                      ? "Thanks — report cleared"
+                      : "Thanks — noted";
+              voteRow.replaceWith(status);
+            });
+            return button;
+          };
+
+          voteRow.append(
+            makeButton("👍 Still there", "confirm", "#34d399"),
+            makeButton("👎 Gone", "gone", "#f87171")
+          );
+          popupBody.appendChild(voteRow);
+          popup.setDOMContent(content);
+        } else {
+          popup.setHTML(popupContent);
+        }
+
+        const marker = new maplibregl.Marker({ element: el, anchor: "bottom" })
           .setLngLat([alert.location.x, alert.location.y])
           .setPopup(popup)
           .addTo(map.current!);
@@ -1808,20 +1158,8 @@ export const Map = forwardRef<MapRef, MapProps>(function Map(
         const pinEl = el.querySelector(".alert-pin") as HTMLElement;
         if (pinEl) pinEl.style.transform = "scale(1)";
       });
-
-      // Track marker clicks
-      el.addEventListener("click", () => {
-        posthog.capture("alert_marker_clicked", {
-          is_cluster: isCluster,
-          alert_count: cluster.alerts.length,
-          alert_type: cluster.mostSevereType,
-          alert_types: isCluster
-            ? Array.from(new Set(cluster.alerts.map((a) => a.type)))
-            : [cluster.mostSevereType],
-        });
-      });
     });
-    
+
     // Remove markers that no longer exist (only remove stale ones)
     for (const [id, marker] of markersRef.current) {
       if (!newMarkerIds.has(id)) {
@@ -1829,47 +1167,36 @@ export const Map = forwardRef<MapRef, MapProps>(function Map(
         markersRef.current.delete(id);
       }
     }
-    
-    // If there was an open popup and the marker still exists, keep it open
-    // (no action needed - we preserved the marker so popup stays open)
-  }, [alerts, mapLoaded, isDarkMode]);
+  }, [alerts, mapLoaded, isDarkMode, onReportVote]);
 
-  // Update speed camera markers - incremental updates to prevent popup glitches
+  // Fixed speed / red-light camera markers (incremental, keyed by camera id)
   useEffect(() => {
     if (!map.current || !mapLoaded) return;
 
-    // Theme-aware colors
     const popupBg = isDarkMode ? "#1a1a1a" : "white";
     const popupText = isDarkMode ? "#e5e5e5" : "#374151";
     const popupSubtext = isDarkMode ? "#9ca3af" : "#6b7280";
-    
-    // Track which markers should exist
-    const newCameraIds = new Set<string>();
 
-    speedCameras.forEach((camera) => {
-      // Use camera ID or generate from coordinates
-      const cameraId = camera.id || `camera-${camera.location.lat.toFixed(6)}-${camera.location.lon.toFixed(6)}`;
-      newCameraIds.add(cameraId);
-      
-      // Check if marker already exists
-      const existingMarker = cameraMarkersRef.current.get(cameraId);
-      
-      if (existingMarker) {
-        // Update position if needed
-        const currentLngLat = existingMarker.getLngLat();
-        if (Math.abs(currentLngLat.lng - camera.location.lon) > 0.00001 || 
-            Math.abs(currentLngLat.lat - camera.location.lat) > 0.00001) {
-          existingMarker.setLngLat([camera.location.lon, camera.location.lat]);
-        }
-        return; // Keep existing marker, don't recreate
+    const visible = speedCameras.slice(0, MAX_CAMERA_MARKERS);
+    const visibleIds = new Set(visible.map((camera) => camera.id));
+
+    // Remove markers that left the dataset/viewport
+    for (const [id, marker] of cameraMarkersRef.current) {
+      if (!visibleIds.has(id)) {
+        marker.remove();
+        cameraMarkersRef.current.delete(id);
       }
-      
-      // Create new marker
+    }
+
+    for (const camera of visible) {
+      if (cameraMarkersRef.current.has(camera.id)) continue;
+
       const el = document.createElement("div");
       el.className = "camera-marker";
-
       const icon = CAMERA_ICONS[camera.type] || CAMERA_ICONS.speed_camera;
-      const cameraTypeLabel = camera.type.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+      const typeLabel = camera.type
+        .replace(/_/g, " ")
+        .replace(/\b\w/g, (character) => character.toUpperCase());
 
       el.innerHTML = `
         <div class="camera-pin" style="
@@ -1877,125 +1204,66 @@ export const Map = forwardRef<MapRef, MapProps>(function Map(
           cursor: pointer;
           transition: transform 0.15s ease-out;
         ">
-          <div class="camera-pin-body" style="
-            display: flex;
-            align-items: center;
-            justify-content: center;
-          ">
-            <img src="${icon}" alt="${cameraTypeLabel}" style="width: 36px; height: auto;${!isDarkMode ? ' filter: drop-shadow(0 1px 2px rgba(0,0,0,0.3));' : ''}" />
-          </div>
+          <img src="${icon}" alt="${typeLabel}" style="width: 28px; height: auto;${!isDarkMode ? " filter: drop-shadow(0 1px 2px rgba(0,0,0,0.3));" : ""}" />
         </div>
       `;
 
-      // Build popup content
-      let popupDetails = "";
-      if (camera.maxspeed) {
-        popupDetails += `<div class="camera-popup-speed" style="color: ${popupText}; font-weight: 600; font-size: 14px;">Limit: ${camera.maxspeed} mph</div>`;
-      }
-      if (camera.direction) {
-        popupDetails += `<div class="camera-popup-direction" style="color: ${popupSubtext}; font-size: 11px; text-transform: capitalize;">Direction: ${camera.direction}</div>`;
-      }
+      // Normalize stored limits (OSM "35 mph"/"50" km/h, city mph numbers)
+      // into the viewer's unit system.
+      const speedLabel = camera.maxspeed
+        ? formatSpeedLimit(camera.maxspeed, camera.source, unitSystem)
+        : null;
+      const attribution =
+        CAMERA_SOURCE_ATTRIBUTION[camera.source ?? ""] ??
+        CAMERA_SOURCE_ATTRIBUTION.osm;
 
       const popupContent = `
         <div class="alert-popup" style="background: ${popupBg}; color: ${popupText};">
-          <div class="alert-popup-header" style="color: #ef4444; margin-bottom: 4px;">
-            📷 ${cameraTypeLabel}
+          <div class="alert-popup-header" style="color: #ef4444;">
+            ${typeLabel}
           </div>
-          ${popupDetails}
-          <div class="camera-popup-source" style="color: ${popupSubtext}; font-size: 10px; margin-top: 6px;">
-            Source: OpenStreetMap
+          ${camera.name ? `<div class="alert-popup-street" style="color: ${popupText}">${camera.name}</div>` : ""}
+          ${speedLabel ? `<div class="alert-popup-subtype" style="color: ${popupSubtext}">Limit: ${speedLabel}</div>` : ""}
+          <div class="alert-popup-meta" style="color: ${popupSubtext}; font-size: 10px;">
+            ${attribution}
           </div>
         </div>
       `;
 
-      const popup = new mapboxgl.Popup({
-        offset: 20,
+      const popup = new maplibregl.Popup({
+        offset: 16,
         closeButton: false,
-        maxWidth: "200px",
+        maxWidth: "220px",
         className: `alert-popup-container ${isDarkMode ? "dark" : ""}`,
       }).setHTML(popupContent);
 
-      const marker = new mapboxgl.Marker({ element: el, anchor: "center" })
+      const marker = new maplibregl.Marker({ element: el, anchor: "center" })
         .setLngLat([camera.location.lon, camera.location.lat])
         .setPopup(popup)
         .addTo(map.current!);
 
-      cameraMarkersRef.current.set(cameraId, marker);
-
-      // Hover effect
       el.addEventListener("mouseenter", () => {
         const pinEl = el.querySelector(".camera-pin") as HTMLElement;
-        if (pinEl) pinEl.style.transform = "scale(1.15) translateY(-3px)";
+        if (pinEl) pinEl.style.transform = "scale(1.2)";
       });
-
       el.addEventListener("mouseleave", () => {
         const pinEl = el.querySelector(".camera-pin") as HTMLElement;
         if (pinEl) pinEl.style.transform = "scale(1)";
       });
 
-      // Track clicks
-      el.addEventListener("click", () => {
-        posthog.capture("speed_camera_clicked", {
-          camera_type: camera.type,
-          has_maxspeed: !!camera.maxspeed,
-          maxspeed: camera.maxspeed,
-        });
-      });
-    });
-    
-    // Remove markers that no longer exist
-    for (const [id, marker] of cameraMarkersRef.current) {
-      if (!newCameraIds.has(id)) {
-        marker.remove();
-        cameraMarkersRef.current.delete(id);
-      }
+      cameraMarkersRef.current.set(camera.id, marker);
     }
-  }, [speedCameras, mapLoaded, isDarkMode]);
-
-  // Pin marker for long-press location (using Waze origin marker style)
-  useEffect(() => {
-    if (!map.current || !mapLoaded) return;
-
-    // Remove existing pin marker
-    if (pinMarkerRef.current) {
-      pinMarkerRef.current.remove();
-      pinMarkerRef.current = null;
-    }
-
-    // Create new pin marker if location is set
-    if (pinLocation) {
-      const el = document.createElement("div");
-      el.className = "pin-marker";
-      el.innerHTML = `
-        <div class="pin-marker-container" style="
-          filter: drop-shadow(0 2px 4px rgba(0,0,0,0.3));
-          animation: pin-pulse 1.5s ease-in-out infinite;
-        ">
-          <svg width="32" height="32" fill="none" viewBox="0 0 22 22" xmlns="http://www.w3.org/2000/svg">
-            <circle cx="11" cy="11" r="11" fill="#fff"/>
-            <circle cx="11" cy="11" r="6.5" fill="#fff" stroke="#0099ff" stroke-width="4"/>
-          </svg>
-        </div>
-      `;
-
-      pinMarkerRef.current = new mapboxgl.Marker({ 
-        element: el, 
-        anchor: "center" 
-      })
-        .setLngLat([pinLocation.lng, pinLocation.lat])
-        .addTo(map.current);
-    }
-  }, [pinLocation, mapLoaded]);
+  }, [speedCameras, mapLoaded, isDarkMode, unitSystem]);
 
   // Route line display - supports multiple routes with selection
   useEffect(() => {
     if (!map.current || !mapLoaded) return;
 
     const mapInstance = map.current;
-    
+
     // Use routes array if provided, otherwise fall back to single route
     const allRoutes = routes.length > 0 ? routes : (route ? [route] : []);
-    
+
     // Function to remove all existing route layers
     const removeAllRouteLayers = () => {
       // Remove up to 5 possible route layers (more than we'll ever need)
@@ -2003,7 +1271,7 @@ export const Map = forwardRef<MapRef, MapProps>(function Map(
         const layerId = `route-layer-${i}`;
         const casingLayerId = `route-casing-layer-${i}`;
         const sourceId = `route-source-${i}`;
-        
+
         if (mapInstance.getLayer(layerId)) {
           mapInstance.removeLayer(layerId);
         }
@@ -2014,7 +1282,7 @@ export const Map = forwardRef<MapRef, MapProps>(function Map(
           mapInstance.removeSource(sourceId);
         }
       }
-      
+
       // Also remove legacy single route layers
       if (mapInstance.getLayer("route-layer")) {
         mapInstance.removeLayer("route-layer");
@@ -2030,15 +1298,15 @@ export const Map = forwardRef<MapRef, MapProps>(function Map(
     // Function to add all routes
     const addRoutes = () => {
       if (allRoutes.length === 0) return;
-      
+
       // Add alternative routes first (so they appear behind selected route)
       allRoutes.forEach((routeData, index) => {
         if (index === selectedRouteIndex) return; // Skip selected route, add it last
-        
+
         const sourceId = `route-source-${index}`;
         const casingLayerId = `route-casing-layer-${index}`;
         const layerId = `route-layer-${index}`;
-        
+
         // Add source
         mapInstance.addSource(sourceId, {
           type: "geojson",
@@ -2091,7 +1359,7 @@ export const Map = forwardRef<MapRef, MapProps>(function Map(
         const sourceId = `route-source-${selectedRouteIndex}`;
         const casingLayerId = `route-casing-layer-${selectedRouteIndex}`;
         const layerId = `route-layer-${selectedRouteIndex}`;
-        
+
         // Add source
         mapInstance.addSource(sourceId, {
           type: "geojson",
@@ -2142,7 +1410,7 @@ export const Map = forwardRef<MapRef, MapProps>(function Map(
         if (coordinates.length > 0) {
           const bounds = coordinates.reduce(
             (bnds, coord) => bnds.extend(coord as [number, number]),
-            new mapboxgl.LngLatBounds(coordinates[0] as [number, number], coordinates[0] as [number, number])
+            new maplibregl.LngLatBounds(coordinates[0] as [number, number], coordinates[0] as [number, number])
           );
 
           mapInstance.fitBounds(bounds, {
@@ -2156,18 +1424,6 @@ export const Map = forwardRef<MapRef, MapProps>(function Map(
     // Remove existing routes and add new ones
     removeAllRouteLayers();
     addRoutes();
-
-    // Cleanup on style change
-    const handleStyleLoad = () => {
-      removeAllRouteLayers();
-      addRoutes();
-    };
-
-    mapInstance.on("style.load", handleStyleLoad);
-
-    return () => {
-      mapInstance.off("style.load", handleStyleLoad);
-    };
   }, [route, routes, selectedRouteIndex, mapLoaded, isDarkMode]);
 
   return (
@@ -2177,30 +1433,17 @@ export const Map = forwardRef<MapRef, MapProps>(function Map(
         className="w-full h-full"
         style={{ position: "absolute", inset: 0 }}
       />
-      {/* Night overlay for satellite map - darkens based on time of day */}
-      {useSatellite && nightOverlayOpacity > 0 && (
-        <div
-          className="pointer-events-none"
-          style={{
-            position: "absolute",
-            inset: 0,
-            backgroundColor: `rgba(0, 0, 20, ${nightOverlayOpacity})`,
-            transition: "background-color 60s ease-in-out",
-            zIndex: 1,
-          }}
-        />
-      )}
       <style jsx global>{`
         .user-marker {
           z-index: 10 !important;
         }
-        
+
         .user-avatar-container {
           position: relative;
           width: 72px;
           height: 72px;
         }
-        
+
         .user-avatar {
           position: absolute;
           top: 50%;
@@ -2210,13 +1453,13 @@ export const Map = forwardRef<MapRef, MapProps>(function Map(
           z-index: 3;
           transition: transform 0.1s ease-out;
         }
-        
+
         .user-avatar img {
           width: 100%;
           height: 100%;
           object-fit: cover;
         }
-        
+
         .user-avatar-pulse {
           position: absolute;
           width: 72px;
@@ -2229,7 +1472,7 @@ export const Map = forwardRef<MapRef, MapProps>(function Map(
           animation: avatar-pulse 2s infinite;
           z-index: 1;
         }
-        
+
         @keyframes avatar-pulse {
           0% {
             transform: translate(-50%, -50%) scale(0.7);
@@ -2240,77 +1483,24 @@ export const Map = forwardRef<MapRef, MapProps>(function Map(
             opacity: 0;
           }
         }
-        
-        .pin-marker {
-          z-index: 15 !important;
-        }
-        
-        @keyframes pin-pulse {
-          0%, 100% {
-            transform: scale(1);
-          }
-          50% {
-            transform: scale(1.1);
-          }
-        }
-        
-        .other-user-marker {
-          z-index: 5 !important;
-        }
-        
-        .other-user-container {
-          position: relative;
-          width: 32px;
-          height: 40px;
-        }
-        
-        .other-user-car {
-          position: absolute;
-          top: 50%;
-          left: 50%;
-          margin-left: -9px;
-          margin-top: -14px;
-          width: 18px;
-          height: 28px;
-          transition: transform 0.3s ease-out;
-        }
-        
-        .other-user-car img {
-          width: 100%;
-          height: 100%;
-          object-fit: contain;
-        }
-        
-        .other-user-shadow {
-          position: absolute;
-          top: 50%;
-          left: 50%;
-          margin-left: -10px;
-          margin-top: -10px;
-          width: 20px;
-          height: 20px;
-          background: radial-gradient(ellipse, rgba(0,0,0,0.15) 0%, transparent 70%);
-          border-radius: 50%;
-          z-index: -1;
-        }
-        
-        .alert-popup-container .mapboxgl-popup-content {
+
+        .alert-popup-container .maplibregl-popup-content {
           padding: 0;
           border-radius: 12px;
           box-shadow: 0 4px 20px rgba(0,0,0,0.2);
           overflow: hidden;
           background: transparent;
         }
-        
-        .alert-popup-container.dark .mapboxgl-popup-content {
+
+        .alert-popup-container.dark .maplibregl-popup-content {
           box-shadow: 0 4px 20px rgba(0,0,0,0.5);
         }
-        
+
         .alert-popup {
           padding: 12px 14px;
           border-radius: 12px;
         }
-        
+
         .alert-popup-header {
           font-weight: 600;
           font-size: 13px;
@@ -2319,35 +1509,35 @@ export const Map = forwardRef<MapRef, MapProps>(function Map(
           align-items: center;
           gap: 4px;
         }
-        
+
         .alert-popup-street {
           font-size: 12px;
           margin-bottom: 2px;
         }
-        
+
         .alert-popup-subtype {
           font-size: 11px;
           text-transform: lowercase;
         }
-        
+
         .alert-popup-desc {
           font-size: 11px;
           margin-top: 6px;
           line-height: 1.4;
         }
-        
+
         .alert-popup-meta {
           font-size: 10px;
           margin-top: 8px;
           display: flex;
           gap: 10px;
         }
-        
-        .mapboxgl-popup-tip {
+
+        .alert-popup-container .maplibregl-popup-tip {
           border-top-color: white;
         }
-        
-        .alert-popup-container.dark .mapboxgl-popup-tip {
+
+        .alert-popup-container.dark .maplibregl-popup-tip {
           border-top-color: #1a1a1a;
         }
       `}</style>

@@ -1,21 +1,25 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import posthog from "posthog-js";
-import { ShieldExclamationIcon, MapIcon } from "@heroicons/react/24/solid";
+import { ShieldExclamationIcon } from "@heroicons/react/24/solid";
+import { trackAnalyticsEvent } from "@/lib/analytics-client";
+import { SuggestionBox } from "@/components/SuggestionBox";
+import type { UnitSystem } from "@/lib/units";
+import type { VoiceLang } from "@/lib/voice";
+
+export type ThemeMode = "auto" | "light" | "dark";
 
 interface SettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
   isDarkMode: boolean;
+  themeMode: ThemeMode;
+  onThemeModeChange: (value: ThemeMode) => void;
+  unitSystem: UnitSystem;
   showWazeAlerts: boolean;
   onToggleWazeAlerts: (value: boolean) => void;
   showSpeedCameras: boolean;
   onToggleSpeedCameras: (value: boolean) => void;
-  showTraffic: boolean;
-  onToggleTraffic: (value: boolean) => void;
-  useSatellite: boolean;
-  onToggleSatellite: (value: boolean) => void;
   showAvatarPulse: boolean;
   onToggleAvatarPulse: (value: boolean) => void;
   showSupportBanner: boolean;
@@ -25,23 +29,23 @@ interface SettingsModalProps {
   onPoliceAlertDistanceChange: (value: number) => void;
   policeAlertSound: boolean;
   onTogglePoliceAlertSound: (value: boolean) => void;
-  // 3D mode settings
-  use3DMode: boolean;
-  onToggle3DMode: (value: boolean) => void;
+  voiceLang: VoiceLang;
+  onVoiceLangChange: (value: VoiceLang) => void;
+  cameraAlertDistance: number;
+  onCameraAlertDistanceChange: (value: number) => void;
 }
 
 export function SettingsModal({
   isOpen,
   onClose,
   isDarkMode,
+  themeMode,
+  onThemeModeChange,
+  unitSystem,
   showWazeAlerts,
   onToggleWazeAlerts,
   showSpeedCameras,
   onToggleSpeedCameras,
-  showTraffic,
-  onToggleTraffic,
-  useSatellite,
-  onToggleSatellite,
   showAvatarPulse,
   onToggleAvatarPulse,
   showSupportBanner,
@@ -50,9 +54,18 @@ export function SettingsModal({
   onPoliceAlertDistanceChange,
   policeAlertSound,
   onTogglePoliceAlertSound,
-  use3DMode,
-  onToggle3DMode,
+  voiceLang,
+  onVoiceLangChange,
+  cameraAlertDistance,
+  onCameraAlertDistanceChange,
 }: SettingsModalProps) {
+  const distanceOptions = [
+    { value: 0, imperial: "Off", metric: "Off" },
+    { value: 402, imperial: "¼ mi", metric: "400 m" },
+    { value: 805, imperial: "½ mi", metric: "800 m" },
+    { value: 1609, imperial: "1 mi", metric: "1.6 km" },
+    { value: 3219, imperial: "2 mi", metric: "3.2 km" },
+  ].map(({ value, ...labels }) => ({ value, label: labels[unitSystem] }));
   const [isVisible, setIsVisible] = useState(false);
   const [shouldRender, setShouldRender] = useState(false);
 
@@ -78,7 +91,7 @@ export function SettingsModal({
   if (!shouldRender) return null;
 
   return (
-    <div 
+    <div
       className={`
         fixed inset-0 z-50 flex items-center justify-center
         transition-opacity duration-300 ease-out
@@ -87,16 +100,16 @@ export function SettingsModal({
       onClick={onClose}
     >
       {/* Backdrop */}
-      <div 
+      <div
         className={`
           absolute inset-0 bg-black/50 backdrop-blur-sm
           transition-opacity duration-300 ease-out
           ${isVisible ? "opacity-100" : "opacity-0"}
-        `} 
+        `}
       />
-      
+
       {/* Modal */}
-      <div 
+      <div
         className={`
           relative w-[80%] h-[80%] rounded-2xl overflow-hidden
           ${isDarkMode ? "bg-[#1a1a1a] text-white" : "bg-white text-black"}
@@ -113,11 +126,7 @@ export function SettingsModal({
         `}>
           <h2 className="text-2xl font-semibold">Settings</h2>
           <button
-            onClick={() => {
-              onClose();
-              // Track settings closed event
-              posthog.capture("settings_closed");
-            }}
+            onClick={onClose}
             className={`
               w-12 h-12 rounded-xl flex items-center justify-center
               ${isDarkMode ? "hover:bg-white/10" : "hover:bg-black/5"}
@@ -136,8 +145,8 @@ export function SettingsModal({
             <div
               className={`
                 p-5 rounded-xl border-2 border-dashed
-                ${isDarkMode 
-                  ? "border-pink-500/50 bg-pink-500/10" 
+                ${isDarkMode
+                  ? "border-pink-500/50 bg-pink-500/10"
                   : "border-pink-400/50 bg-pink-50"
                 }
               `}
@@ -147,20 +156,20 @@ export function SettingsModal({
                 <div>
                   <div className="text-lg font-semibold">Help Sponsor This Project</div>
                   <div className={`text-base ${isDarkMode ? "text-gray-400" : "text-gray-500"}`}>
-                    TeslaNav will always be free and ad-free. Your support helps keep it that way!
+                    Your support helps cover hosting, data maintenance, and ongoing development.
                   </div>
                 </div>
                 {/* QR Code */}
-                <div 
+                <div
                   className="bg-white p-3 rounded-xl cursor-pointer hover:scale-105 transition-transform"
                   onClick={() => {
-                    posthog.capture("sponsor_qr_clicked");
+                    trackAnalyticsEvent("sponsor_clicked", "settings");
                     window.open("https://buy.stripe.com/9B68wPg5wavU3Px3Tb7EQ0c", "_blank");
                   }}
                 >
-                  <img 
-                    src="/teslanav-donation-qrcode.png" 
-                    alt="Scan to donate" 
+                  <img
+                    src="/teslanav-donation-qrcode.png"
+                    alt="Scan to donate"
                     className="w-40 h-40"
                   />
                 </div>
@@ -170,48 +179,12 @@ export function SettingsModal({
               </div>
             </div>
 
-            {/* Map Style Section */}
-            <div>
-              <h3 className={`text-base font-medium uppercase tracking-wider mb-4 ${isDarkMode ? "text-gray-400" : "text-gray-500"}`}>
-                Map Style
-              </h3>
-              
-              <div className="space-y-4">
-                {/* Satellite Toggle */}
-                <div className={`
-                  flex items-center justify-between p-5 rounded-xl
-                  ${isDarkMode ? "bg-white/5" : "bg-black/5"}
-                `}>
-                  <div className="flex items-center gap-4">
-                    <span className="text-3xl">🛰️</span>
-                    <div>
-                      <div className="text-lg font-medium">Satellite View</div>
-                      <div className={`text-base ${isDarkMode ? "text-gray-400" : "text-gray-500"}`}>
-                        Use satellite imagery instead of standard map
-                      </div>
-                    </div>
-                  </div>
-                  <Toggle
-                    enabled={useSatellite}
-                    onToggle={(value) => {
-                      onToggleSatellite(value);
-                      // Track satellite view toggle
-                      posthog.capture("satellite_view_toggled", {
-                        satellite_enabled: value,
-                      });
-                    }}
-                    isDarkMode={isDarkMode}
-                  />
-                </div>
-              </div>
-            </div>
-
             {/* Map Layers Section */}
             <div>
               <h3 className={`text-base font-medium uppercase tracking-wider mb-4 ${isDarkMode ? "text-gray-400" : "text-gray-500"}`}>
                 Map Layers
               </h3>
-              
+
               <div className="space-y-4">
                 {/* Waze Alerts Toggle */}
                 <div className={`
@@ -229,13 +202,7 @@ export function SettingsModal({
                   </div>
                   <Toggle
                     enabled={showWazeAlerts}
-                    onToggle={(value) => {
-                      onToggleWazeAlerts(value);
-                      // Track Waze alerts toggle
-                      posthog.capture("waze_alerts_toggled", {
-                        alerts_enabled: value,
-                      });
-                    }}
+                    onToggle={onToggleWazeAlerts}
                     isDarkMode={isDarkMode}
                   />
                 </div>
@@ -246,11 +213,12 @@ export function SettingsModal({
                   ${isDarkMode ? "bg-white/5" : "bg-black/5"}
                 `}>
                   <div className="flex items-center gap-4">
-                    <span className="text-3xl">📷</span>
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src="/icons/speed-camera.svg" alt="" className="w-8 h-8" />
                     <div>
                       <div className="text-lg font-medium">Speed Cameras</div>
                       <div className={`text-base ${isDarkMode ? "text-gray-400" : "text-gray-500"}`}>
-                        Speed & red light cameras from OpenStreetMap
+                        Fixed speed &amp; red-light camera locations
                       </div>
                     </div>
                   </div>
@@ -258,37 +226,7 @@ export function SettingsModal({
                     enabled={showSpeedCameras}
                     onToggle={(value) => {
                       onToggleSpeedCameras(value);
-                      // Track speed cameras toggle
-                      posthog.capture("speed_cameras_toggled", {
-                        cameras_enabled: value,
-                      });
-                    }}
-                    isDarkMode={isDarkMode}
-                  />
-                </div>
-
-                {/* Traffic Toggle */}
-                <div className={`
-                  flex items-center justify-between p-5 rounded-xl
-                  ${isDarkMode ? "bg-white/5" : "bg-black/5"}
-                `}>
-                  <div className="flex items-center gap-4">
-                    <MapIcon className="w-8 h-8 text-orange-500" />
-                    <div>
-                      <div className="text-lg font-medium">Traffic Layer</div>
-                      <div className={`text-base ${isDarkMode ? "text-gray-400" : "text-gray-500"}`}>
-                        Show real-time traffic congestion
-                      </div>
-                    </div>
-                  </div>
-                  <Toggle
-                    enabled={showTraffic}
-                    onToggle={(value) => {
-                      onToggleTraffic(value);
-                      // Track traffic layer toggle
-                      posthog.capture("traffic_layer_toggled", {
-                        traffic_enabled: value,
-                      });
+                      trackAnalyticsEvent("speed_cameras_toggled", value ? "on" : "off");
                     }}
                     isDarkMode={isDarkMode}
                   />
@@ -301,7 +239,7 @@ export function SettingsModal({
               <h3 className={`text-base font-medium uppercase tracking-wider mb-4 ${isDarkMode ? "text-gray-400" : "text-gray-500"}`}>
                 Police Alerts
               </h3>
-              
+
               <div className="space-y-4">
                 {/* Alert Distance Selector */}
                 <div className={`
@@ -318,27 +256,52 @@ export function SettingsModal({
                     </div>
                   </div>
                   <div className="flex gap-2 flex-wrap">
-                    {[
-                      { value: 0, label: "Off" },
-                      { value: 402, label: "¼ mi" },
-                      { value: 805, label: "½ mi" },
-                      { value: 1609, label: "1 mi" },
-                      { value: 3219, label: "2 mi" },
-                    ].map((option) => (
+                    {distanceOptions.map((option) => (
                       <button
                         key={option.value}
-                        onClick={() => {
-                          onPoliceAlertDistanceChange(option.value);
-                          posthog.capture("police_alert_distance_changed", {
-                            distance_meters: option.value,
-                          });
-                        }}
+                        onClick={() => onPoliceAlertDistanceChange(option.value)}
                         className={`
                           px-4 py-2.5 rounded-xl text-base font-medium transition-all
                           ${policeAlertDistance === option.value
                             ? "bg-blue-500 text-white"
-                            : isDarkMode 
-                              ? "bg-white/10 hover:bg-white/20 text-white" 
+                            : isDarkMode
+                              ? "bg-white/10 hover:bg-white/20 text-white"
+                              : "bg-black/10 hover:bg-black/20 text-black"
+                          }
+                        `}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Camera Alert Distance Selector */}
+                <div className={`
+                  p-5 rounded-xl
+                  ${isDarkMode ? "bg-white/5" : "bg-black/5"}
+                `}>
+                  <div className="flex items-center gap-4 mb-4">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src="/icons/speed-camera.svg" alt="" className="w-8 h-8" />
+                    <div>
+                      <div className="text-lg font-medium">Camera Warnings</div>
+                      <div className={`text-base ${isDarkMode ? "text-gray-400" : "text-gray-500"}`}>
+                        Warn when a speed or red-light camera is ahead (needs the Speed Cameras layer)
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex gap-2 flex-wrap">
+                    {distanceOptions.map((option) => (
+                      <button
+                        key={option.value}
+                        onClick={() => onCameraAlertDistanceChange(option.value)}
+                        className={`
+                          px-4 py-2.5 rounded-xl text-base font-medium transition-all
+                          ${cameraAlertDistance === option.value
+                            ? "bg-amber-500 text-white"
+                            : isDarkMode
+                              ? "bg-white/10 hover:bg-white/20 text-white"
                               : "bg-black/10 hover:bg-black/20 text-black"
                           }
                         `}
@@ -353,27 +316,62 @@ export function SettingsModal({
                 <div className={`
                   flex items-center justify-between p-5 rounded-xl
                   ${isDarkMode ? "bg-white/5" : "bg-black/5"}
-                  ${policeAlertDistance === 0 ? "opacity-50 pointer-events-none" : ""}
+                  ${policeAlertDistance === 0 && cameraAlertDistance === 0 ? "opacity-50 pointer-events-none" : ""}
                 `}>
                   <div className="flex items-center gap-4">
                     <span className="text-3xl">🔊</span>
                     <div>
                       <div className="text-lg font-medium">Sound Alert</div>
                       <div className={`text-base ${isDarkMode ? "text-gray-400" : "text-gray-500"}`}>
-                        Play audio when police are nearby
+                        Play audio for police and camera warnings
                       </div>
                     </div>
                   </div>
                   <Toggle
                     enabled={policeAlertSound}
-                    onToggle={(value) => {
-                      onTogglePoliceAlertSound(value);
-                      posthog.capture("police_alert_sound_toggled", {
-                        sound_enabled: value,
-                      });
-                    }}
+                    onToggle={onTogglePoliceAlertSound}
                     isDarkMode={isDarkMode}
                   />
+                </div>
+
+                {/* Voice language */}
+                <div className={`
+                  p-5 rounded-xl
+                  ${isDarkMode ? "bg-white/5" : "bg-black/5"}
+                  ${policeAlertDistance === 0 && cameraAlertDistance === 0 ? "opacity-50 pointer-events-none" : ""}
+                `}>
+                  <div className="flex items-center gap-4 mb-4">
+                    <span className="text-3xl">🗣️</span>
+                    <div>
+                      <div className="text-lg font-medium">Voice Language</div>
+                      <div className={`text-base ${isDarkMode ? "text-gray-400" : "text-gray-500"}`}>
+                        Spoken alerts where supported; the Tesla browser plays the chime instead
+                      </div>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-4 gap-2">
+                    {([
+                      { value: "auto", label: "Auto" },
+                      { value: "es", label: "Español" },
+                      { value: "pt", label: "Português" },
+                      { value: "en", label: "English" },
+                    ] as const).map((option) => (
+                      <button
+                        key={option.value}
+                        onClick={() => onVoiceLangChange(option.value)}
+                        className={`
+                          px-3 h-12 rounded-xl text-sm font-medium transition-all
+                          ${voiceLang === option.value
+                            ? "bg-red-500 text-white"
+                            : isDarkMode
+                              ? "bg-white/5 text-gray-300 hover:bg-white/10"
+                              : "bg-black/5 text-gray-700 hover:bg-black/10"}
+                        `}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
             </div>
@@ -383,8 +381,50 @@ export function SettingsModal({
               <h3 className={`text-base font-medium uppercase tracking-wider mb-4 ${isDarkMode ? "text-gray-400" : "text-gray-500"}`}>
                 Appearance
               </h3>
-              
+
               <div className="space-y-4">
+                {/* Theme Mode Selector */}
+                <div className={`
+                  p-5 rounded-xl
+                  ${isDarkMode ? "bg-white/5" : "bg-black/5"}
+                `}>
+                  <div className="flex items-center gap-4 mb-4">
+                    <span className="text-3xl">🌗</span>
+                    <div>
+                      <div className="text-lg font-medium">Theme</div>
+                      <div className={`text-base ${isDarkMode ? "text-gray-400" : "text-gray-500"}`}>
+                        Auto switches with sunrise and sunset at your location
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex gap-2 flex-wrap">
+                    {([
+                      { value: "auto", label: "Auto" },
+                      { value: "light", label: "Light" },
+                      { value: "dark", label: "Dark" },
+                    ] as const).map((option) => (
+                      <button
+                        key={option.value}
+                        onClick={() => {
+                          onThemeModeChange(option.value);
+                          trackAnalyticsEvent("theme_mode_changed", option.value);
+                        }}
+                        className={`
+                          px-5 py-2.5 rounded-xl text-base font-medium transition-all
+                          ${themeMode === option.value
+                            ? "bg-blue-500 text-white"
+                            : isDarkMode
+                              ? "bg-white/10 hover:bg-white/20 text-white"
+                              : "bg-black/10 hover:bg-black/20 text-black"
+                          }
+                        `}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
                 {/* Avatar Pulse Toggle */}
                 <div className={`
                   flex items-center justify-between p-5 rounded-xl
@@ -401,13 +441,7 @@ export function SettingsModal({
                   </div>
                   <Toggle
                     enabled={showAvatarPulse}
-                    onToggle={(value) => {
-                      onToggleAvatarPulse(value);
-                      // Track avatar pulse toggle
-                      posthog.capture("avatar_pulse_toggled", {
-                        pulse_enabled: value,
-                      });
-                    }}
+                    onToggle={onToggleAvatarPulse}
                     isDarkMode={isDarkMode}
                   />
                 </div>
@@ -428,60 +462,15 @@ export function SettingsModal({
                   </div>
                   <Toggle
                     enabled={showSupportBanner}
-                    onToggle={(value) => {
-                      onToggleSupportBanner(value);
-                      posthog.capture("support_banner_toggled", {
-                        banner_enabled: value,
-                      });
-                    }}
+                    onToggle={onToggleSupportBanner}
                     isDarkMode={isDarkMode}
                   />
                 </div>
               </div>
             </div>
 
-            {/* Experimental Section */}
-            <div>
-              <h3 className={`text-base font-medium uppercase tracking-wider mb-4 ${isDarkMode ? "text-gray-400" : "text-gray-500"}`}>
-                Experimental
-              </h3>
-              
-              <div className="space-y-4">
-                {/* 3D Mode Toggle */}
-                <div className={`
-                  p-5 rounded-xl
-                  ${isDarkMode ? "bg-white/5" : "bg-black/5"}
-                `}>
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-4">
-                      <span className="text-3xl">🏔️</span>
-                      <div>
-                        <div className="text-lg font-medium">3D Map View</div>
-                        <div className={`text-base ${isDarkMode ? "text-gray-400" : "text-gray-500"}`}>
-                          Show terrain elevation with tilted camera
-                        </div>
-                      </div>
-                    </div>
-                    <Toggle
-                      enabled={use3DMode}
-                      onToggle={(value) => {
-                        onToggle3DMode(value);
-                        posthog.capture("3d_mode_toggled", {
-                          mode_enabled: value,
-                        });
-                      }}
-                      isDarkMode={isDarkMode}
-                    />
-                  </div>
-                  <div className={`
-                    mt-4 p-3 rounded-lg text-sm
-                    ${isDarkMode ? "bg-amber-500/10 text-amber-200" : "bg-amber-50 text-amber-700"}
-                  `}>
-                    <span className="font-medium">Note:</span> 3D mode may not work on older Tesla browsers. Enabling this will also activate follow mode for the best experience.
-                  </div>
-                </div>
-              </div>
-            </div>
+            {/* Suggestions */}
+            <SuggestionBox isDarkMode={isDarkMode} />
 
             {/* About Section */}
             <div>
@@ -498,66 +487,14 @@ export function SettingsModal({
                 </div>
                 <div className={`text-base mt-2 ${isDarkMode ? "text-gray-400" : "text-gray-500"}`}>
                   Made by{" "}
-                  <a 
-                    href="https://x.com/ryanvogel" 
-                    target="_blank" 
+                  <a
+                    href="https://x.com/ryanvogel"
+                    target="_blank"
                     rel="noopener noreferrer"
                     className="text-blue-500 hover:underline"
                   >
                     Ryan Vogel
                   </a>
-                </div>
-              </div>
-            </div>
-
-            {/* Known Issues Section */}
-            <div>
-              <h3 className={`text-base font-medium uppercase tracking-wider mb-4 ${isDarkMode ? "text-gray-400" : "text-gray-500"}`}>
-                Known Issues
-              </h3>
-              <div className={`
-                p-5 rounded-xl
-                ${isDarkMode ? "bg-amber-500/10 border border-amber-500/20" : "bg-amber-50 border border-amber-200"}
-              `}>
-                <div className="flex items-center gap-4">
-                  <span className="text-3xl">🔧</span>
-                  <div>
-                    <div className="text-lg font-medium">Search & Navigation</div>
-                    <div className={`text-base ${isDarkMode ? "text-gray-400" : "text-gray-500"}`}>
-                      We are aware that the search and navigation functionality is currently not working as expected. We&apos;re actively working on a fix. Thank you for your patience!
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Support Section */}
-            <div>
-              <h3 className={`text-base font-medium uppercase tracking-wider mb-4 ${isDarkMode ? "text-gray-400" : "text-gray-500"}`}>
-                Support
-              </h3>
-              <div className={`
-                p-5 rounded-xl
-                ${isDarkMode ? "bg-white/5" : "bg-black/5"}
-              `}>
-                <div className="flex items-center gap-4">
-                  <span className="text-3xl">💬</span>
-                  <div>
-                    <div className="text-lg font-medium">Feature Requests & Bug Reports</div>
-                    <div className={`text-base ${isDarkMode ? "text-gray-400" : "text-gray-500"}`}>
-                      Have an idea or found a bug? Let us know!
-                    </div>
-                    <a 
-                      href="mailto:ryan@teslanav.com"
-                      className="inline-flex items-center gap-2 mt-3 px-4 py-2 rounded-lg bg-blue-500 text-white text-base font-medium hover:bg-blue-600 transition-colors"
-                      onClick={() => {
-                        posthog.capture("support_email_clicked");
-                      }}
-                    >
-                      <EmailIcon className="w-5 h-5" />
-                      ryan@teslanav.com
-                    </a>
-                  </div>
                 </div>
               </div>
             </div>
@@ -569,12 +506,12 @@ export function SettingsModal({
 }
 
 // Toggle Switch Component
-function Toggle({ 
-  enabled, 
+function Toggle({
+  enabled,
   onToggle,
-  isDarkMode 
-}: { 
-  enabled: boolean; 
+  isDarkMode
+}: {
+  enabled: boolean;
   onToggle: (value: boolean) => void;
   isDarkMode: boolean;
 }) {
@@ -583,8 +520,8 @@ function Toggle({
       onClick={() => onToggle(!enabled)}
       className={`
         relative w-16 h-9 rounded-full transition-colors duration-200 flex-shrink-0
-        ${enabled 
-          ? "bg-blue-500" 
+        ${enabled
+          ? "bg-blue-500"
           : isDarkMode ? "bg-white/20" : "bg-black/20"
         }
       `}
@@ -605,22 +542,6 @@ function CloseIcon({ className }: { className?: string }) {
   return (
     <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
       <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-    </svg>
-  );
-}
-
-function EmailIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 01-2.25 2.25h-15a2.25 2.25 0 01-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25m19.5 0v.243a2.25 2.25 0 01-1.07 1.916l-7.5 4.615a2.25 2.25 0 01-2.36 0L3.32 8.91a2.25 2.25 0 01-1.07-1.916V6.75" />
-    </svg>
-  );
-}
-
-function ExternalLinkIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 6H5.25A2.25 2.25 0 003 8.25v10.5A2.25 2.25 0 005.25 21h10.5A2.25 2.25 0 0018 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" />
     </svg>
   );
 }
