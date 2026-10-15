@@ -7,6 +7,7 @@ import { FeedbackModal } from "@/components/FeedbackModal";
 import { ReportModal } from "@/components/ReportModal";
 import { WelcomeBackFanfare } from "@/components/WelcomeBackFanfare";
 import { WhatsNew } from "@/components/WhatsNew";
+import { detectEnvironment } from "@/lib/device";
 import { useGeolocation } from "@/hooks/useGeolocation";
 import { useSolarTheme } from "@/hooks/useSolarTheme";
 import { useWazeAlerts } from "@/hooks/useWazeAlerts";
@@ -241,19 +242,13 @@ export default function Home() {
     }
   }, []);
 
-  // Detect mobile devices (but not Tesla browser)
+  // Detect real phones (never the Tesla browser). Uses the physical screen
+  // and touch, not the user agent or window width, because Tesla 2026.26
+  // dropped the UA token and renders in a narrow window. See lib/device.ts.
   useEffect(() => {
     if (typeof window !== "undefined") {
-      const userAgent = navigator.userAgent.toLowerCase();
-      // Check if it's a Tesla browser (Tesla browsers identify themselves)
-      const isTeslaBrowser = userAgent.includes("tesla") || userAgent.includes("qtcarbrowser");
-      // Check if it's a mobile device
-      const isMobileDevice = /android|webos|iphone|ipad|ipod|blackberry|iemobile|opera mini/i.test(userAgent);
-      // Also check screen width as a fallback
-      const isSmallScreen = window.innerWidth < 768;
-
-      // Show warning if mobile and NOT Tesla browser
-      setIsMobile((isMobileDevice || isSmallScreen) && !isTeslaBrowser);
+      const { isRealMobile } = detectEnvironment();
+      setIsMobile(isRealMobile);
 
       // Check if user previously dismissed the warning
       const dismissed = localStorage.getItem("teslanav-mobile-dismissed");
