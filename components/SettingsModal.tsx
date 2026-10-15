@@ -5,6 +5,7 @@ import { ShieldExclamationIcon } from "@heroicons/react/24/solid";
 import { trackAnalyticsEvent } from "@/lib/analytics-client";
 import { SuggestionBox } from "@/components/SuggestionBox";
 import type { UnitSystem } from "@/lib/units";
+import type { VoiceLang } from "@/lib/voice";
 
 export type ThemeMode = "auto" | "light" | "dark";
 
@@ -28,6 +29,8 @@ interface SettingsModalProps {
   onPoliceAlertDistanceChange: (value: number) => void;
   policeAlertSound: boolean;
   onTogglePoliceAlertSound: (value: boolean) => void;
+  voiceLang: VoiceLang;
+  onVoiceLangChange: (value: VoiceLang) => void;
   cameraAlertDistance: number;
   onCameraAlertDistanceChange: (value: number) => void;
 }
@@ -51,6 +54,8 @@ export function SettingsModal({
   onPoliceAlertDistanceChange,
   policeAlertSound,
   onTogglePoliceAlertSound,
+  voiceLang,
+  onVoiceLangChange,
   cameraAlertDistance,
   onCameraAlertDistanceChange,
 }: SettingsModalProps) {
@@ -327,6 +332,46 @@ export function SettingsModal({
                     onToggle={onTogglePoliceAlertSound}
                     isDarkMode={isDarkMode}
                   />
+                </div>
+
+                {/* Voice language */}
+                <div className={`
+                  p-5 rounded-xl
+                  ${isDarkMode ? "bg-white/5" : "bg-black/5"}
+                  ${policeAlertDistance === 0 && cameraAlertDistance === 0 ? "opacity-50 pointer-events-none" : ""}
+                `}>
+                  <div className="flex items-center gap-4 mb-4">
+                    <span className="text-3xl">🗣️</span>
+                    <div>
+                      <div className="text-lg font-medium">Voice Language</div>
+                      <div className={`text-base ${isDarkMode ? "text-gray-400" : "text-gray-500"}`}>
+                        Spoken alerts where supported; the Tesla browser plays the chime instead
+                      </div>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-4 gap-2">
+                    {([
+                      { value: "auto", label: "Auto" },
+                      { value: "es", label: "Español" },
+                      { value: "pt", label: "Português" },
+                      { value: "en", label: "English" },
+                    ] as const).map((option) => (
+                      <button
+                        key={option.value}
+                        onClick={() => onVoiceLangChange(option.value)}
+                        className={`
+                          px-3 h-12 rounded-xl text-sm font-medium transition-all
+                          ${voiceLang === option.value
+                            ? "bg-red-500 text-white"
+                            : isDarkMode
+                              ? "bg-white/5 text-gray-300 hover:bg-white/10"
+                              : "bg-black/5 text-gray-700 hover:bg-black/10"}
+                        `}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
             </div>

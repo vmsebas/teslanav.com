@@ -8,6 +8,12 @@ import { ReportModal } from "@/components/ReportModal";
 import { WelcomeBackFanfare } from "@/components/WelcomeBackFanfare";
 import { WhatsNew } from "@/components/WhatsNew";
 import { detectEnvironment } from "@/lib/device";
+import {
+  announce,
+  warmUpVoices,
+  VOICE_LANG_STORAGE_KEY,
+  type VoiceLang,
+} from "@/lib/voice";
 import { useGeolocation } from "@/hooks/useGeolocation";
 import { useSolarTheme } from "@/hooks/useSolarTheme";
 import { useWazeAlerts } from "@/hooks/useWazeAlerts";
@@ -124,6 +130,17 @@ export default function Home() {
   });
   const [policeAlertToast, setPoliceAlertToast] = useState<{ show: boolean; expanding: boolean } | null>(null);
   const alertedPoliceIdsRef = useRef<Set<string>>(new Set());
+  // Spoken-alert language. "auto" follows the browser locale. Where no voice
+  // is installed (the Tesla browser) alerts fall back to the chime.
+  const [voiceLang, setVoiceLang] = useState<VoiceLang>(() => {
+    if (typeof window !== "undefined") {
+      const saved = localStorage.getItem(VOICE_LANG_STORAGE_KEY);
+      if (saved === "es" || saved === "pt" || saved === "en" || saved === "auto") {
+        return saved;
+      }
+    }
+    return "auto";
+  });
   // Camera proximity alerts mirror the police alert flow
   const [cameraAlertDistance, setCameraAlertDistance] = useState(() => {
     if (typeof window !== "undefined") {
@@ -291,6 +308,15 @@ export default function Home() {
     setPoliceAlertSound(value);
     if (typeof window !== "undefined") {
       localStorage.setItem("teslanav-police-sound", value.toString());
+      if (value) warmUpVoices();
+    }
+  }, []);
+
+  const handleVoiceLangChange = useCallback((value: VoiceLang) => {
+    setVoiceLang(value);
+    if (typeof window !== "undefined") {
+      localStorage.setItem(VOICE_LANG_STORAGE_KEY, value);
+      warmUpVoices();
     }
   }, []);
 
@@ -369,12 +395,9 @@ export default function Home() {
           setPoliceAlertToast({ show: true, expanding: true });
         }, 50);
 
-        // Play sound if enabled
-        if (policeAlertSound && alertAudioRef.current) {
-          alertAudioRef.current.currentTime = 0;
-          alertAudioRef.current.play().catch(err => {
-            console.log("Audio play failed:", err);
-          });
+        // Speak the alert where a voice exists, else play the chime.
+        if (policeAlertSound) {
+          announce("police", { lang: voiceLang, fallback: alertAudioRef.current });
         }
 
         trackAnalyticsEvent(
@@ -391,7 +414,7 @@ export default function Home() {
         break;
       }
     }
-  }, [latitude, longitude, alerts, policeAlertDistance, policeAlertSound, showWazeAlerts, getDistanceInMeters, effectiveHeading, isAlertAhead]);
+  }, [latitude, longitude, alerts, policeAlertDistance, policeAlertSound, voiceLang, showWazeAlerts, getDistanceInMeters, effectiveHeading, isAlertAhead]);
 
   // Fixed camera proximity alerts (speed / red-light), mirroring the police
   // flow: warmup marks nearby cameras as seen, then only newly approached
@@ -447,11 +470,11 @@ export default function Home() {
       setTimeout(() => {
         setCameraAlertToast({ label });
       }, 0);
-      if (policeAlertSound && alertAudioRef.current) {
-        alertAudioRef.current.currentTime = 0;
-        alertAudioRef.current.play().catch((err) => {
-          console.log("Audio play failed:", err);
-        });
+      if (policeAlertSound) {
+        announce(
+          camera.type === "red_light_camera" ? "red_light_camera" : "speed_camera",
+          { lang: voiceLang, fallback: alertAudioRef.current }
+        );
       }
       trackAnalyticsEvent("camera_alert_triggered", camera.type);
       setTimeout(() => {
@@ -459,7 +482,7 @@ export default function Home() {
       }, 5000);
       break;
     }
-  }, [latitude, longitude, cameras, cameraAlertDistance, showSpeedCameras, policeAlertSound, getDistanceInMeters, effectiveHeading, isAlertAhead]);
+  }, [latitude, longitude, cameras, cameraAlertDistance, showSpeedCameras, policeAlertSound, voiceLang, getDistanceInMeters, effectiveHeading, isAlertAhead]);
 
   // Forward report votes and reflect the result on the map immediately.
   const handleReportVote = useCallback(
@@ -878,10 +901,9 @@ export default function Home() {
           <button
             onClick={() => {
               setPoliceAlertToast({ show: true, expanding: true });
-              // Play sound if enabled
-              if (policeAlertSound && alertAudioRef.current) {
-                alertAudioRef.current.currentTime = 0;
-                alertAudioRef.current.play().catch(err => console.log("Audio play failed:", err));
+              // Speak the alert if enabled (chime fallback where no voice).
+              if (policeAlertSound) {
+                announce("police", { lang: voiceLang, fallback: alertAudioRef.current });
               }
               // Auto-hide after 5 seconds
               setTimeout(() => setPoliceAlertToast(null), 5000);
@@ -1054,6 +1076,8 @@ export default function Home() {
         onPoliceAlertDistanceChange={handlePoliceAlertDistanceChange}
         policeAlertSound={policeAlertSound}
         onTogglePoliceAlertSound={handleTogglePoliceAlertSound}
+        voiceLang={voiceLang}
+        onVoiceLangChange={handleVoiceLangChange}
         cameraAlertDistance={cameraAlertDistance}
         onCameraAlertDistanceChange={handleCameraAlertDistanceChange}
       />
