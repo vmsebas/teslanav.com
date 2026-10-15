@@ -2,7 +2,7 @@
 
 Fecha del análisis: 15 de octubre de 2026. Repositorio analizado: `vmsebas/teslanav.com` (fork de `R44VC0RP/teslanav.com`).
 
-> Las secciones marcadas con **[pendiente]** se completan con la investigación todavía en curso.
+> Informe completo. Metodología: lectura directa del repositorio y de los PRs y forks de upstream, inspección del código cliente público de teslanav.com, codriver.io y del live-map de Waze, descarga de los ficheros oficiales (DGT, ANSR, data.gouv.fr, BOE, TJUE), documentación oficial de Tesla y seis investigaciones web independientes con fuentes citadas. Lo no verificado se señala como tal.
 
 ---
 
@@ -17,7 +17,8 @@ Fecha del análisis: 15 de octubre de 2026. Repositorio analizado: `vmsebas/tesl
 4. **La API de Tesla permite las dos cosas que preguntas.** Leer posición/ruta (vehicle_data o Fleet Telemetry) y **enviar un destino a la navegación nativa** (`navigation_gps_request`, `navigation_request`, `navigation_waypoints_request`). codriver solo lee por decisión propia; enviar destinos es técnicamente posible y oficial.
 5. **El propio Ryan ya escribió la integración con la Fleet API** y está en el PR #10 del repo público (ago-2026, sin fusionar): OAuth de Tesla, emparejamiento de *virtual key* por QR desde la pantalla del coche, proxy `vehicle-command`, receptor de Fleet Telemetry con la ruta del coche, y una guía de 370 líneas. Es reutilizable.
 6. **Coste de la API de Tesla:** para un coche propio es gratis en la práctica (crédito de 10 €/mes por cuenta; un envío de destino cuesta 0,001 $). Para 20.000 usuarios, entre ~600 $/mes (solo enviar destinos) y ~1.100-3.000 $/mes (con telemetría de ruta). Despertar coches dormidos (0,02 $) y el *polling* de `vehicle_data` son lo que arruina el presupuesto.
-7. **Radares:** hay datos oficiales (DGT: dataset DATEX II CC-BY de radares fijos + PDF de puntos y tramos actualizado el 03-ago-2026; ANSR Portugal: 123 locales SINCRO en PDF) y OSM tiene cobertura decente en Lisboa/Madrid. Avisar de radares con una app es legal en España y Portugal; detectores e inhibidores no.
+7. **Radares:** hay datos oficiales con coordenadas (DGT: DATEX II CC-BY con 690 cabinas y 47 tramos; Cataluña: fichero diario; Francia: CSV oficial) y OSM tiene 2.493 radares en España y 301 en Portugal. La ANSR portuguesa solo publica PDF (su JSON interno con coordenadas requiere permiso). Avisar de radares con una app es legal en España (art. 13.6 Ley de Tráfico y art. 18.3 RGC desde 1-oct-2026) y en Portugal; prohibido en Suiza, restringido en Francia y Alemania.
+7b. **Alertas de tráfico:** no hay vía legal a los datos de Waze para una app privada, y ninguna fuente legal (Waze for Cities, TomTom, HERE, DGT) entrega avisos de **policía**. La DGT publica gratis un DATEX II con cientos de incidencias por minuto (obras, cortes, accidentes, objetos en calzada); Cataluña y TomTom cubren el resto; Portugal exige pedir acceso al NAP. Los avisos de policía solo pueden venir de **reportes de tus propios usuarios** (lo que hacen codriver y el teslanav.com relanzado).
 8. **Lo que no hay que hacer:** saltarse el reCAPTCHA de Waze (viola sus términos, es frágil y te expone legalmente), hacer *polling* de `vehicle_data`, o volver a Mapbox para tiles.
 9. **Recomendación:** revivir el fork en tres fases: (A) mapa gratuito + radares oficiales/OSM + reportes propios; (B) conexión con la Fleet API para enviar destinos al navegador del coche y, opcionalmente, pintar la ruta nativa del Tesla; (C) si se quiere abrir al público, modelo legal/GDPR y de pago. Detalle en la sección 8.
 
@@ -108,7 +109,7 @@ Arquitectura observada (web pública, API pública, términos y changelog):
 - Avisos de policía son la función más demandada (es lo que hacía TeslaWaze y TeslaNav); TeslaWaze murió con el corte de Waze y no volvió.
 - Que funcione **mientras se conduce**, sin teclear, con voz. codriver vende precisamente eso.
 - Mantenimiento: el cambio de densidad de píxeles de 2026.26 dejó rotas las webapps abandonadas; una app para el Tesla exige seguir las actualizaciones de firmware.
-- **[pendiente]** Resumen de hilos de Reddit/TMC y comunidades en español/portugués.
+- Hilos de referencia: TMC "Discover codriver.io" (beta, ago-oct 2026, usuarios de EE. UU. probándolo en trayectos reales), TMC "TeslaWaze updates (was: TeslaWaze is Done!)", Club Tesla España (hilos 10457 y 10895: radares nativos poco fiables en radares de tramo, navegador usable en autovía), foro ABRP "Send route to Tesla". No pude revisar Reddit ni foros portugueses en esta sesión (los foros bloquean la lectura automatizada y se agotó la cuota de búsquedas); queda como hueco menor.
 
 ---
 
@@ -210,13 +211,33 @@ Para probar en tu coche sin registrar app: Teslemetry o Tessie. Para una app pú
 
 ## 5. Datos de alertas y radares
 
-### 5.1 Alertas tipo Waze (policía, accidentes, atascos)
+### 5.1 Alertas tipo Waze (policía, accidentes, atascos): qué se puede usar legalmente
 
-- **Waze georss**: protegido con reCAPTCHA Enterprise desde marzo de 2026 (verificado). Saltárselo viola los términos de Waze y es un blanco móvil. No es una base.
-- **Canales legales de Waze** (Waze for Cities / Partner Hub): **[pendiente]** confirmar si un desarrollador privado puede acceder.
-- **Reportes propios**: es lo que hacen teslanav.com relanzado, codriver y el fork "Radar". Problema de arranque en frío: con pocos usuarios el mapa está vacío. Mitigación: combinar con datos oficiales de incidencias (DGT/IP) y radares fijos, que sí tienen valor desde el día uno.
-- **API pública de codriver** (`/v2/entities/nearby`): incluye su capa Waze y OSM, pero solo para **uso personal no comercial**; para una app pública habría que negociar.
-- **Proveedores comerciales de incidentes (TomTom, HERE…) y datos abiertos (DGT DATEX II, Infraestruturas de Portugal)**: **[pendiente]** precios, cobertura y si incluyen avisos de policía.
+**Waze, en todas sus formas, está descartado:**
+
+- El endpoint `georss` devuelve 403 a clientes automatizados desde el 19-mar-2026 por un WAF con reCAPTCHA Enterprise, con independencia de IP, cabeceras o huella TLS (issue guberm/waze-alerts-monitor #1; README de KaraZajac/OVERWATCH). En sep-oct 2026 Waze también cerró el endpoint de routing que usaban pywaze y Home Assistant, y hasta usuarios legítimos del Live Map sufren 403 que Waze "sigue investigando" (foro Waze, último mensaje de staff 6-oct-2026).
+- Los Términos de Uso de Waze (modificados 8-jul-2026, vigentes desde 1-ago-2026) prohíben el acceso automatizado, la descarga masiva, el uso comercial y la integración en otro producto sin consentimiento escrito.
+- **Waze for Cities** (el canal oficial) solo admite administraciones públicas y operadores de carretera que aporten datos propios; su licencia prohíbe crear "un producto que haga funciones iguales o similares a Waze (por ejemplo, una app de navegación)" y ceder datos a terceros. Y su feed **no incluye el tipo POLICE** (solo ACCIDENT, JAM, HAZARD, MISC, CONSTRUCTION, ROAD_CLOSED).
+- Los "Waze API" de marketplaces (OpenWeb Ninja, ~0,005 $/petición, ~20 min de retraso; Zyla) no declaran licencia: con toda probabilidad son scraping revendido y heredan el mismo riesgo de corte. Es la hipótesis más plausible para la capa "Waze" de codriver, que muestra policía con `reliability`/`thumbs_up`, campos que el canal legal no entrega. No es un camino a copiar.
+
+**Lo que sí se puede usar:**
+
+| Fuente | Cobertura | Coste | Latencia | ¿Policía? | Notas |
+|---|---|---|---|---|---|
+| **DGT, NAP DATEX II v3.6/3.7** (`nap.dgt.es/datex2/v3/dgt/SituationPublication/datex2_v37.xml`) | España salvo País Vasco y Cataluña | Gratis, sin registro | 1 min | No | Verificado hoy: 857 situaciones activas (602 obras, 252 cortes de carril, 129 de calzada, 118 tráfico lento, 56 objetos en calzada, 35 accidentes, 30 cortes, 25 desprendimientos, niebla, inundaciones). Obligación legal europea (Reglamento 2022/670), muy estable. Confirmar por escrito el uso comercial con nap@dgt.es. |
+| **Servei Català de Trànsit** (RSS/GML `gencat.cat/transit/opendata/incidenciesRSS.xml`) | Cataluña | Gratis | Continua | No | 216 incidencias hoy; reutilización con atribución. Coordenadas en la versión GML. |
+| Euskadi (DT-GV, en el NAP) | País Vasco | Gratis | n/d | No | Licencia sin aclarar. |
+| **Infraestruturas de Portugal / NAP portugués** (nap-portugal.imt-ip.pt) | Portugal | Gratis (presumible) | n/d | No | Punto débil: la web de IP excluye el uso comercial y el NAP exige registro y solicitud de acceso; el agregador transitoagora.pt confirma que existe una fuente máquina-legible. Pedir acceso; mientras tanto, TomTom para Portugal. |
+| **TomTom Traffic Incidents** | España y Portugal | 2.500 peticiones de detalle/mes gratis; 200.000 tiles de incidentes y flujo/mes; ~0,75 €/1.000 después | ~1 min | No | 13 categorías (accidente, atasco, obras, cortes, vehículo averiado, niebla, hielo, inundación…). Refresco por minuto. |
+| HERE Traffic v7 | 70+ países | Free tier no publicado | 2 min | No | 11 tipos; precio solo con cuenta. |
+| Mapbox Directions `driving-traffic` | "Geografías soportadas" | Incluido en Directions | n/d | No | Devuelve `incidents[]` a lo largo de la ruta; cobertura ibérica por comprobar. |
+| Google Routes | — | — | — | No expone incidentes | Solo densidad de tráfico y peajes. |
+| Radarbot SDK | Mundial | Sin precio público; solo partners "de alto potencial" | Tiempo real | Sí en la app (SDK por confirmar) | SocialDrive y Flitsmeister no ofrecen API; Coyote sin verificar. |
+| **Reportes comunitarios propios** | Donde haya usuarios | Infraestructura propia | Segundos | **Sí** | La única fuente legal de avisos de policía además de un acuerdo con una app comunitaria. |
+
+**Conclusión:** ninguna fuente legal entrega avisos de policía. Arquitectura híbrida recomendada: (i) DGT + SCT (+ IP cuando se consiga acceso) como capa base gratuita y estable; (ii) TomTom para Portugal y vías no estatales; (iii) capa comunitaria propia para policía, con el modelo de codriver (reporte con un toque, confirmación al pasar a ~80 m, caducidad corta, ponderación por confianza del reportero) y sembrando el mapa con los feeds oficiales para que nunca esté vacío; (iv) opcionalmente el SDK de Radarbot si aceptan la alianza.
+
+Fuentes: github.com/guberm/waze-alerts-monitor/issues/1; github.com/KaraZajac/OVERWATCH; github.com/home-assistant/core/issues/183802; github.com/eifinger/pywaze/issues/110; support.google.com/waze/answer/12373727 (ToU); support.google.com/waze/partners/answer/10453062 y /13458165 (Waze for Cities y especificación del feed); docs.tomtom.com/pricing y traffic-api; docs.here.com/traffic-api; docs.mapbox.com/api/navigation/directions; nap.dgt.es; transit.gencat.cat; infraestruturasdeportugal.pt (termos); transitoagora.pt; radarbot.com/desarrolladores; BOE DOUE L122/2022 (Reglamento 2022/670).
 
 ### 5.2 Radares: fuentes de datos (verificado el 15-oct-2026, ficheros descargados y analizados)
 
