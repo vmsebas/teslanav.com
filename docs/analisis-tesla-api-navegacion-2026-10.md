@@ -218,28 +218,44 @@ Para probar en tu coche sin registrar app: Teslemetry o Tessie. Para una app pú
 - **API pública de codriver** (`/v2/entities/nearby`): incluye su capa Waze y OSM, pero solo para **uso personal no comercial**; para una app pública habría que negociar.
 - **Proveedores comerciales de incidentes (TomTom, HERE…) y datos abiertos (DGT DATEX II, Infraestruturas de Portugal)**: **[pendiente]** precios, cobertura y si incluyen avisos de policía.
 
-### 5.2 Radares
+### 5.2 Radares: fuentes de datos (verificado el 15-oct-2026, ficheros descargados y analizados)
 
-| Fuente | Qué es | Formato | Notas |
-|---|---|---|---|
-| DGT "Radares fijos DGT" (nap.dgt.es) | Radares fijos de la red estatal (sin Cataluña ni País Vasco) | DATEX II, licencia CC-BY | Dataset abierto; conviene suscribirse a avisos de cambios. |
-| DGT "Puntos y tramos de control de velocidad" | Fijos + tramo (y el resto de cinemómetros) | PDF (1,52 MB), actualizado 03-ago-2026 | Habría que extraer tabla a datos; no indica coordenadas sino vía y PK. |
-| DGT nota de prensa 27-feb-2026 | 33 radares nuevos (20 fijos, 13 de tramo) | PDF/web | "Puestos a disposición de los operadores de navegadores". |
-| ANSR / radaresavista.pt (Portugal) | 123 locales SINCRO (100 instantánea + 23 media) | Web + PDF | Sin API ni GeoJSON oficial. |
-| OpenStreetMap | `highway=speed_camera`, `enforcement=*` | Overpass o extracto propio | 110 cámaras en 25 km de Lisboa, 145 en Madrid (datos vistos vía codriver). Cobertura buena en ciudades, desigual fuera. Licencia ODbL. |
-| **[pendiente]** Francia (data.gouv.fr), SCDB, TomTom, Radarbot, calidad OSM por país | | | |
+| Fuente | Cobertura | Formato | Coordenadas | Licencia | Notas |
+|---|---|---|---|---|---|
+| **DGT, NAP "Radares fijos DGT"** (nap.dgt.es → `/datex2/dgt/PredefinedLocationsPublication/radares/content.xml`) | España, red estatal (sin Cataluña ni País Vasco) | DATEX II XML (2 MB) | **Sí**: 690 cabinas (lat/lon, carretera, PK, sentido, provincia) + 47 tramos de velocidad media (inicio/fin) | **CC-BY**, sin token | `publicationTime` 18-dic-2025: va ~8 meses por detrás del PDF. |
+| DGT, PDF "Puntos y tramos de control de velocidad" (dgt.es) | España, red estatal | PDF 32 págs., 03-ago-2026 | No (carretera + PK + sentido) | No declarada | 707 radares fijos, 126 de tramo, **1.325 tramos de radar móvil**. Es la fuente más fresca; hay que extraer la tabla y georreferenciar por PK. |
+| Servei Català de Trànsit, `radars.txt` (transparenciacatalunya.cat) | Cataluña | TXT, diario | Sí (UTM 31N ETRS89) | Datos abiertos Generalitat | ~247 filas; sin sentido. |
+| **ANSR / radaresavista.pt** (Portugal) | Red nacional SINCRO | PDF (jul-2026): 100 de velocidad instantánea + 23 de media | No (km) | Propiedad ANSR, sin licencia abierta | El mapa del sitio carga un JSON interno con **coordenadas de 121 locales** (ago-2025), pero sus términos prohíben reproducirlo sin autorización escrita: **pedir permiso a la ANSR** antes de usarlo. |
+| Município de Lisboa (dados.gov.pt) | Lisboa | Dataset abierto | Por verificar | CC0 | Radares municipales. |
+| PSP, listas mensuales de radares móviles | Portugal | Noticias/PDF | No | — | Publicadas hasta abril de 2026; una fuente afirma que el programa se canceló en mayo de 2026. La GNR no publica. |
+| Ministère de l'Intérieur (data.gouv.fr) | Francia | CSV | Sí (~3.400 radares, tipo, velocidad) | Licence Ouverte 2.0 | Actualizado 30-dic-2025. Modelo a seguir. |
+| MIT Italia (velox.mit.gov.it) | Italia | Tabla web | No | Pública sin descarga | 3.625 dispositivos (nov-2025). |
+| **OpenStreetMap** | Mundial | PBF / GeoJSON | Sí | ODbL | `highway=speed_camera`: 2.493 nodos en España (89 % con `maxspeed`, 61 % con `direction`), 301 en Portugal, ~35.400 en 28 países europeos; relaciones `enforcement`: 2.630 en España, 174 en Portugal. Más completo que las listas oficiales (incluye municipales y semafóricos) pero sin garantía de frescura. Importar el dataset DGT a OSM está bloqueado por la licencia; **fusionarlo en tu app sí es viable** con atribución. |
+| SCDB.info (misma empresa que Blitzer.de/CamSam) | 113 países | CSV/GPX/JSON/KML/OV2 | Sí | Propietaria | 9,95 €/12 meses para particulares; licencia B2B bajo solicitud sin precio público. |
+| TomTom Speed Camera Services / HERE `SAFETY_ALERTS` / Radarbot SDK | Mundial | API/feed/SDK | Sí | Propietaria | Precio bajo contrato; TomTom solo opera donde es legal (en Francia solo "zonas de peligro"); Radarbot solo para partners seleccionados. |
+| todo-poi.es, lufop.net | ES/PT | POI por dispositivo | Sí | Sin licencia declarada | Origen opaco; no redistribuir. |
 
-Recomendación técnica: dejar de consultar Overpass en vivo. Generar un **GeoJSON estático de cámaras** (OSM filtrado con `osmium tags-filter` + lista oficial DGT/ANSR georreferenciada) y servirlo desde la CDN con refresco semanal. Es lo que en la práctica hace codriver con su capa `osm-cameras`.
+Reino Unido, Alemania, Países Bajos y Bélgica no tienen dataset nacional geolocalizado. Referencia open source útil: `GeiserX/radares-anunciados` (GPL-3), que fusiona DGT + listas policiales + OSM con atribución.
 
-### 5.3 Legalidad de avisar de radares
+**Recomendación técnica:** dejar de consultar Overpass en vivo y generar un **GeoJSON estático** de cámaras: `osmium tags-filter europe-latest.osm.pbf n/highway=speed_camera` + `osmium export` (≈9-13 MB para Europa sin comprimir, <1 MB para España y Portugal), fusionado con el DATEX II de la DGT, el TXT catalán y el CSV francés; refresco diario o semanal; servido desde CDN con ETag. Publicar esa base derivada bajo ODbL y atribuir a OSM, DGT y Ministère de l'Intérieur.
 
-| País | Apps que avisan de radares (posición conocida) | Detectores / inhibidores | Norma |
-|---|---|---|---|
-| España | **Legal** ("Avisar es legal; detectar e inhibir, no", DGT) | Detectores: 200 € y 3 puntos; inhibidores: hasta 6.000 € y 6 puntos | Ley de Tráfico (art. 13.6 y 76), reforma RGC |
-| Portugal | **Legal** según fuentes especializadas (Waze, Radarbot operan) | Prohibidos: 500-2.500 € y aprehensión | Código da Estrada, art. 84 |
-| Francia | Prohibido avisar de posición exacta; permitido "zonas de peligro" | Prohibidos | Code de la route R413-15 |
-| Alemania | Prohibido **usarlos conduciendo** (75 €) | Prohibidos | §23 StVO |
-| **[pendiente]** Italia, Suiza, Reino Unido; verificación de la noticia "la UE prepara multas para apps" | | | |
+### 5.3 Legalidad de las apps que avisan de radares (no detectores)
+
+| País | Apps de aviso | Norma | Sanción por detectores/inhibidores | Confianza |
+|---|---|---|---|---|
+| **España** | **Legal.** El art. 13.6 de la Ley de Tráfico (RDL 6/2015, red. Ley 18/2021) excluye expresamente "los mecanismos de aviso que informan de la posición de los sistemas de vigilancia"; el nuevo art. 18.3 del RGC (RD 518/2026, en vigor 1-oct-2026) repite el texto. | Art. 13.6 LTSV; art. 18.3 RGC | Detector: 200 € y 3 puntos (art. 76.g); inhibidor: 6.000 € y 6 puntos (art. 77.h); instalarlo: 3.000-20.000 € | Alta |
+| **Portugal** | **Legal** en la práctica y por la lectura del precepto (prohíbe aparatos que *revelan la presencia* o *perturban* los cinemómetros, no listas de posiciones); la propia ANSR publica el mapa y la PSP publicó listas. Sin aclaración oficial sobre apps. | Art. 84.º n.º 3 y 5 Código da Estrada; DL 70/95 | 500-2.500 € y pérdida del aparato | Media |
+| Francia | Solo "zonas de peligro"; la posición exacta está prohibida | Art. R413-15 Code de la route | Hasta 1.500 €, 6 puntos, confiscación | Media-alta |
+| Alemania | Prohibido que el **conductor** use la función en marcha | §23 Abs. 1c StVO | 75 € y 1 punto | Alta |
+| Italia | Zona gris: apps toleradas, dispositivos localizadores prohibidos | Art. 45 c. 9-bis CdS | 825-3.305 € | Media |
+| Suiza | **Prohibido**, incluidas apps y servicios de aviso | Art. 98a LCR | Multa, confiscación | Alta |
+| Reino Unido | Legal (la prohibición de 2006 nunca entró en vigor) | Road Safety Act 2006 s.18 | — | Alta |
+
+**Sobre la noticia "la UE prepara multas para apps de radares"** (pplware, 27-jun-2026): es engañosa. Se refiere a la sentencia de la Gran Sala del TJUE de 16-jun-2026 (asuntos C-188/24 y C-190/24, Coyote c. Francia), que solo dice que un Estado puede prohibir a un servicio de navegación establecido en otro Estado retransmitir avisos de **determinados controles policiales**, cumpliendo la Directiva 2000/31. No habla de radares fijos ni crea sanciones; no existe iniciativa legislativa de la UE.
+
+**Implicación de diseño:** geocercar el comportamiento por país (ocultar radares en Suiza, mostrar solo zonas en Francia, aviso de no uso en marcha en Alemania) y, en Francia, cuidado también con los avisos de policía.
+
+Fuentes: nap.dgt.es/dataset/radares-fijos-dgt; dgt.es "Equipos y tramos de vigilancia" (PDF 20260803); analisi.transparenciacatalunya.cat (re3y-fftf); radaresavista.pt (PDF y términos); dados.gov.pt (Lisboa); data.gouv.fr "liste-des-radars-fixes-en-france"; velox.mit.gov.it; taginfo (14/15-oct-2026); community.openstreetmap.org (hilo 127051); scdb.info; tomtom.com/products/speed-camera-data; boe.es (RDL 6/2015 consolidado; RD 518/2026); curia.europa.eu (comunicado 87/26); fedlex (LCR art. 98a); dejure.org (§23 StVO).
 
 ---
 
