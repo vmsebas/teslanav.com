@@ -27,3 +27,20 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## Speed-camera open data
+
+Fixed speed / red-light camera locations are imported from open datasets. Each
+marker displays its source attribution in the app:
+
+- **OpenStreetMap** contributors — Open Database License (ODbL). Nodes tagged
+  `highway=speed_camera` / `enforcement=*`.
+- **Dirección General de Tráfico (DGT, Spain)** — national access point
+  (nap.dgt.es), DATEX II, Creative Commons Attribution (CC-BY). Fixed cabins
+  and average-speed sections, excluding the Basque Country and Catalonia.
+- **Ministère de l'Intérieur (France)** — fixed-radar list on data.gouv.fr,
+  Licence Ouverte 2.0.
+- **City of Chicago** (Socrata) and **Washington DC DDOT** (ArcGIS) open data.
+
+These sources are contacted only by the admin-triggered importer
+(`lib/speed-cameras.ts`), never by the user-facing runtime.

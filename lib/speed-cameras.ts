@@ -14,9 +14,15 @@ import type { SpeedCameraSource, SpeedCameraType } from "@/types/speedcamera";
  * - City of Chicago open data (Socrata): authoritative speed + red-light
  *   camera locations for the city's automated enforcement program.
  * - DC open data (ArcGIS): DDOT Automated Safety Cameras, Live/Warning only.
+ * - DGT (Spain) national access point DATEX II: 690 fixed cabins + 47 average
+ *   speed sections, with coordinates, licensed CC-BY. Excludes the Basque
+ *   Country and Catalonia, which run their own traffic authorities.
+ * - Ministère de l'Intérieur (France) open CSV: ~3,400 fixed radars with
+ *   coordinates, under Licence Ouverte 2.0.
  *
- * City rows win over OSM rows: OSM points of the same type within ~130m of a
- * city point are dropped to avoid double markers.
+ * Authoritative rows (city + DGT + France) win over OSM rows: OSM points of
+ * the same type within ~130m of an authoritative point are dropped to avoid
+ * double markers.
  */
 
 const USER_AGENT = "TeslaNav-camera-importer/1.0 (https://teslanav.com)";
@@ -28,6 +34,18 @@ const US_BBOXES = [
   "18.5,-160.6,22.5,-154.5",
   "54.5,-170.0,71.5,-129.0",
 ];
+// Mainland Iberia + Balearics, and the Canary Islands.
+const IBERIA_BBOXES = [
+  "36.0,-9.6,43.9,4.4",
+  "27.5,-18.3,29.5,-13.3",
+];
+// Spain DGT national access point (DATEX II, CC-BY). Point cabins + average
+// speed sections, with coordinates. No token required.
+const DGT_DATEX2_URL =
+  "https://nap.dgt.es/datex2/dgt/PredefinedLocationsPublication/radares/content.xml";
+// France, Ministère de l'Intérieur fixed-radar list (Licence Ouverte 2.0).
+const FRANCE_CSV_URL =
+  "https://www.data.gouv.fr/api/1/datasets/r/17f7cfd9-a5fe-4b6a-9f5d-3625feaa396e";
 const CHICAGO_SPEED_URL =
   "https://data.cityofchicago.org/resource/4i42-qv3h.json?$limit=2000";
 const CHICAGO_RED_LIGHT_URL =
@@ -87,11 +105,23 @@ async function fetchJson(url: string, init?: RequestInit): Promise<unknown> {
   return response.json();
 }
 
-async function fetchOsmCameras(): Promise<ImportedCamera[]> {
+async function fetchText(url: string, init?: RequestInit): Promise<string> {
+  const response = await fetch(url, {
+    ...init,
+    headers: { "User-Agent": USER_AGENT, ...init?.headers },
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+  });
+  if (!response.ok) {
+    throw new Error(`${new URL(url).host} returned ${response.status}`);
+  }
+  return response.text();
+}
+
+async function fetchOsmCameras(bboxes: string[]): Promise<ImportedCamera[]> {
   // Every clause is a rare-tag index lookup. Do not filter within
   // highway=traffic_signals here: that forces a scan of millions of signal
   // nodes and times out; the bare red_light_camera tag is fast and complete.
-  const clauses = US_BBOXES.flatMap((bbox) => [
+  const clauses = bboxes.flatMap((bbox) => [
     `node["highway"="speed_camera"](${bbox});`,
     `node["enforcement"="maxspeed"](${bbox});`,
     `node["enforcement"="average_speed"](${bbox});`,
@@ -229,6 +259,107 @@ async function fetchDcCameras(): Promise<ImportedCamera[]> {
   return cameras;
 }
 
+async function fetchDgtCameras(): Promise<ImportedCamera[]> {
+  const xml = await fetchText(DGT_DATEX2_URL, { headers: { Accept: "application/xml" } });
+  // One predefinedLocation block per camera. The namespace prefix is always
+  // "_0:" in this feed; the lookahead stops each block before the next one.
+  const blockRe =
+    /<_0:predefinedLocation id="([^"]+)">([\s\S]*?)<\/_0:predefinedLocation>\s*(?=<_0:predefinedLocation id=|<\/)/g;
+  const latLonRe =
+    /<_0:latitude>(-?[\d.]+)<\/_0:latitude>\s*<_0:longitude>(-?[\d.]+)<\/_0:longitude>/;
+  const roadRe = /<_0:roadNumber>([^<]+)<\/_0:roadNumber>/;
+  const dirRe = /<_0:directionRelative>([^<]+)<\/_0:directionRelative>/;
+  const descRe = /<_0:value[^>]*>([^<]+)<\/_0:value>/g;
+
+  const cameras: ImportedCamera[] = [];
+  const seen = new Set<string>();
+  for (const match of xml.matchAll(blockRe)) {
+    const rawId = match[1];
+    const body = match[2];
+    const coord = latLonRe.exec(body);
+    if (!coord) continue;
+    const lat = Number(coord[1]);
+    const lon = Number(coord[2]);
+    if (!validCoordinates(lat, lon)) continue;
+
+    const id = `dgt-${rawId.replace(/^GUID_/, "")}`;
+    if (seen.has(id)) continue;
+    seen.add(id);
+
+    const isSection = /CVM/i.test(rawId);
+    const road = roadRe.exec(body)?.[1]?.trim();
+    const descriptors = [...body.matchAll(descRe)].map((d) => d[1].trim());
+    // descriptor[0] echoes the internal id; the first value that is neither
+    // the id nor the road number is the nearest place name.
+    const place = descriptors.find(
+      (value) => value !== rawId.replace(/^GUID_/, "") && value !== road
+    );
+    const directionRelative = dirRe.exec(body)?.[1]?.trim();
+    const direction =
+      directionRelative === "positive"
+        ? "forward"
+        : directionRelative === "negative"
+          ? "backward"
+          : undefined;
+
+    const label = [road, place].filter(Boolean).join(" · ");
+    cameras.push({
+      id,
+      type: isSection ? "average_speed_camera" : "speed_camera",
+      lat,
+      lon,
+      direction,
+      name: label || undefined,
+    });
+  }
+  return cameras;
+}
+
+async function fetchFranceCameras(): Promise<ImportedCamera[]> {
+  const csv = await fetchText(FRANCE_CSV_URL, { headers: { Accept: "text/csv" } });
+  const lines = csv.split(/\r?\n/).filter((line) => line.trim().length > 0);
+  if (lines.length < 2) return [];
+  const delimiter = lines[0].includes(";") ? ";" : ",";
+  const header = lines[0].split(delimiter).map((h) => h.trim().toLowerCase());
+  const col = (...names: string[]) =>
+    header.findIndex((h) => names.some((n) => h === n || h.includes(n)));
+  const latCol = col("latitude", "lat");
+  const lonCol = col("longitude", "lon", "lng");
+  const idCol = col("id");
+  const typeCol = col("type", "equipement");
+  const speedCol = col("vitesse", "vma", "speed");
+  if (latCol < 0 || lonCol < 0) {
+    throw new Error("France CSV: latitude/longitude columns not found");
+  }
+
+  const cameras: ImportedCamera[] = [];
+  const seen = new Set<string>();
+  for (let i = 1; i < lines.length; i++) {
+    // Values here never contain the delimiter, so a plain split is safe.
+    const cells = lines[i].split(delimiter);
+    const lat = Number(cells[latCol]);
+    const lon = Number(cells[lonCol]);
+    if (!validCoordinates(lat, lon)) continue;
+    const rawId = idCol >= 0 ? cells[idCol]?.trim() : "";
+    const id = `fr-${rawId || `${lat.toFixed(5)},${lon.toFixed(5)}`}`;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const rawType = typeCol >= 0 ? (cells[typeCol] ?? "").toLowerCase() : "";
+    const type: SpeedCameraType = /tron|troncon|vitesse moyenne|etvm/.test(rawType)
+      ? "average_speed_camera"
+      : "speed_camera";
+    const speed = speedCol >= 0 ? cells[speedCol]?.trim() : undefined;
+    cameras.push({
+      id,
+      type,
+      lat,
+      lon,
+      maxspeed: speed && /^\d+$/.test(speed) ? speed : undefined,
+    });
+  }
+  return cameras;
+}
+
 function withoutCityDuplicates(
   osmCameras: ImportedCamera[],
   cityCameras: ImportedCamera[]
@@ -250,19 +381,22 @@ function withoutCityDuplicates(
  */
 export async function importSpeedCameras(): Promise<SpeedCameraImportResult> {
   const sources: SpeedCameraImportResult["sources"] = [];
-  const cityCameras: ImportedCamera[] = [];
+  const authoritativeCameras: ImportedCamera[] = [];
 
-  const cityFetches: Array<{
+  // Official datasets with coordinates. Each wins over OSM near its points.
+  const authoritativeFetches: Array<{
     source: SpeedCameraSource;
     fetcher: () => Promise<ImportedCamera[]>;
   }> = [
     { source: "chicago", fetcher: fetchChicagoCameras },
     { source: "dc", fetcher: fetchDcCameras },
+    { source: "dgt", fetcher: fetchDgtCameras },
+    { source: "france", fetcher: fetchFranceCameras },
   ];
-  for (const { source, fetcher } of cityFetches) {
+  for (const { source, fetcher } of authoritativeFetches) {
     try {
       const cameras = await fetcher();
-      cityCameras.push(...cameras);
+      authoritativeCameras.push(...cameras);
       sources.push({ source, count: replaceSpeedCameras(source, cameras) });
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
@@ -271,7 +405,8 @@ export async function importSpeedCameras(): Promise<SpeedCameraImportResult> {
   }
 
   try {
-    const osmCameras = withoutCityDuplicates(await fetchOsmCameras(), cityCameras);
+    const osmRaw = await fetchOsmCameras([...US_BBOXES, ...IBERIA_BBOXES]);
+    const osmCameras = withoutCityDuplicates(osmRaw, authoritativeCameras);
     sources.push({ source: "osm", count: replaceSpeedCameras("osm", osmCameras) });
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);

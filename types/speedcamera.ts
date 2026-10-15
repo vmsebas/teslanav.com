@@ -14,7 +14,12 @@ export interface SpeedCamera {
   source?: SpeedCameraSource; // dataset the point came from
 }
 
-export type SpeedCameraSource = "osm" | "chicago" | "dc";
+export type SpeedCameraSource =
+  | "osm"
+  | "chicago"
+  | "dc"
+  | "dgt"
+  | "france";
 
 export interface SpeedCameraResponse {
   cameras: SpeedCamera[];

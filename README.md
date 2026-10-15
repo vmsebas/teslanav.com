@@ -100,7 +100,8 @@ app/api/           # Server-side API routes (Next.js Route Handlers)
   admin/usage/     # Instance stats (SQLite counts, Redis keys, feedback)
   directions/      # STUB - empty (Mapbox removed)
   geocode/         # STUB - empty (LocationIQ removed)
-  speedcameras/    # STUB - empty (OSM Overpass removed)
+  speedcameras/    # Fixed speed/red-light cameras served from SQLite
+  admin/speedcameras/ # Admin-triggered importer (OSM + open data)
 
 components/        # React UI components (Map.tsx = MapLibre GL + OpenFreeMap)
 hooks/             # Custom React hooks (data fetching, GPS, GPX)
@@ -114,7 +115,18 @@ types/             # TypeScript interfaces
 scripts/           # waze-relay.user.js (Tampermonkey relay) + dev utilities
 ```
 
-Everything is local except Waze's RT alert servers and OpenFreeMap's public style/tile service. Redis is an in-memory cache; SQLite stores recordings, feedback, and stable RT credentials.
+Everything is local except Waze's RT alert servers and OpenFreeMap's public style/tile service. Redis is an in-memory cache; SQLite stores recordings, feedback, stable RT credentials, and the imported speed-camera table.
+
+### Fixed speed cameras
+
+`/api/speedcameras` serves fixed speed and red-light cameras from the local SQLite table; no request leaves the box at runtime. The table is refreshed occasionally by an admin-triggered importer (`POST /api/admin/speedcameras`, monthly is plenty — fixed cameras rarely move). Sources, all free and with coordinates:
+
+- **OpenStreetMap** via Overpass (US + Iberia bounding boxes), ODbL.
+- **DGT** (Spain) national access point, DATEX II, CC-BY: 690 fixed cabins + 47 average-speed sections. Excludes the Basque Country and Catalonia.
+- **Ministère de l'Intérieur** (France) open CSV, Licence Ouverte 2.0.
+- City of Chicago and Washington DC open data (US).
+
+Portugal is covered by OpenStreetMap (the ANSR list is PDF-only and its map JSON is not openly licensed). Authoritative points win over OSM points of the same type within ~130 m. Each marker shows its source attribution.
 
 ### How live Waze alerts work (no browser required)
 
