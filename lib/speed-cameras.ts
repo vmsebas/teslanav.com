@@ -46,6 +46,9 @@ const DGT_DATEX2_URL =
 // France, Ministère de l'Intérieur fixed-radar list (Licence Ouverte 2.0).
 const FRANCE_CSV_URL =
   "https://www.data.gouv.fr/api/1/datasets/r/17f7cfd9-a5fe-4b6a-9f5d-3625feaa396e";
+// Lisbon (Portugal) municipal radars, open data (CC0), ArcGIS GeoJSON.
+const LISBOA_GEOJSON_URL =
+  "https://services.arcgis.com/1dSrzEWVQn5kHHyK/arcgis/rest/services/MOB_RadaresPaineis/FeatureServer/0/query?outFields=*&where=1%3D1&f=geojson";
 const CHICAGO_SPEED_URL =
   "https://data.cityofchicago.org/resource/4i42-qv3h.json?$limit=2000";
 const CHICAGO_RED_LIGHT_URL =
@@ -360,6 +363,35 @@ async function fetchFranceCameras(): Promise<ImportedCamera[]> {
   return cameras;
 }
 
+async function fetchLisbonCameras(): Promise<ImportedCamera[]> {
+  const data = (await fetchJson(LISBOA_GEOJSON_URL)) as {
+    features?: Array<{
+      geometry?: { coordinates?: [number, number] };
+      properties?: { OBJECTID?: number; REFNAME?: string };
+    }>;
+  };
+  const cameras: ImportedCamera[] = [];
+  for (const feature of data.features ?? []) {
+    const [lon, lat] = feature.geometry?.coordinates ?? [];
+    const properties = feature.properties ?? {};
+    // The layer mixes radars with info panels; keep only radars.
+    if (
+      !validCoordinates(lat, lon) ||
+      properties.OBJECTID === undefined ||
+      (properties.REFNAME ?? "").trim().toLowerCase() !== "radar"
+    ) {
+      continue;
+    }
+    cameras.push({
+      id: `lisboa-${properties.OBJECTID}`,
+      type: "speed_camera",
+      lat: lat as number,
+      lon: lon as number,
+    });
+  }
+  return cameras;
+}
+
 function withoutCityDuplicates(
   osmCameras: ImportedCamera[],
   cityCameras: ImportedCamera[]
@@ -392,6 +424,7 @@ export async function importSpeedCameras(): Promise<SpeedCameraImportResult> {
     { source: "dc", fetcher: fetchDcCameras },
     { source: "dgt", fetcher: fetchDgtCameras },
     { source: "france", fetcher: fetchFranceCameras },
+    { source: "lisboa", fetcher: fetchLisbonCameras },
   ];
   for (const { source, fetcher } of authoritativeFetches) {
     try {

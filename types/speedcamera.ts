@@ -19,7 +19,8 @@ export type SpeedCameraSource =
   | "chicago"
   | "dc"
   | "dgt"
-  | "france";
+  | "france"
+  | "lisboa";
 
 export interface SpeedCameraResponse {
   cameras: SpeedCamera[];

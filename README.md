@@ -124,9 +124,10 @@ Everything is local except Waze's RT alert servers and OpenFreeMap's public styl
 - **OpenStreetMap** via Overpass (US + Iberia bounding boxes), ODbL.
 - **DGT** (Spain) national access point, DATEX II, CC-BY: 690 fixed cabins + 47 average-speed sections. Excludes the Basque Country and Catalonia.
 - **Ministère de l'Intérieur** (France) open CSV, Licence Ouverte 2.0.
+- **Câmara Municipal de Lisboa** (Portugal) open GeoJSON, CC0 (municipal radars).
 - City of Chicago and Washington DC open data (US).
 
-Portugal is covered by OpenStreetMap (the ANSR list is PDF-only and its map JSON is not openly licensed). Authoritative points win over OSM points of the same type within ~130 m. Each marker shows its source attribution.
+Portugal nationwide is covered by OpenStreetMap (the ANSR SINCRO list is PDF-only and its map JSON is not openly licensed); Lisbon adds its own CC0 radar layer on top. Authoritative points win over OSM points of the same type within ~130 m. Each marker shows its source attribution.
 
 ### How live Waze alerts work (no browser required)
 

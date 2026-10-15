@@ -83,6 +83,7 @@ const CAMERA_SOURCE_ATTRIBUTION: Record<string, string> = {
   dc: "Data: DC DDOT",
   dgt: "Datos: DGT (CC-BY)",
   france: "Données: Ministère de l'Intérieur (Licence Ouverte 2.0)",
+  lisboa: "Dados: Câmara Municipal de Lisboa (CC0)",
 };
 
 // Keep marker count sane in dense cities; the API already caps per-request.

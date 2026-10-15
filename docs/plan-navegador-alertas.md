@@ -89,4 +89,8 @@ Si más adelante quieres algo de navegación: buscar un sitio y mandarlo a la na
 - **Policía depende de Waze** (no oficial, frágil). Es el núcleo de lo que quieres y es lo menos estable. Hay que asumirlo.
 - **Tesla ya avisa de radares fijos** (con Premium y ruta activa): nuestra ventaja es que avisamos sin ruta, con obras/accidentes/policía, y de un vistazo.
 - **Cambios de firmware** del navegador del Tesla pueden romper cosas (como pasó en 2026.26); hay que probar tras cada actualización.
-- **Portugal**: radares por OSM; incidencias oficiales de la DGT solo cubren España (para Portugal habría que ver el acceso al punto nacional portugués, pendiente).
+- **Portugal** (verificado 15-oct-2026, datos abiertos):
+  - Radares: OSM cubre todo el país (~300, ya integrado) + Lisboa publica un GeoJSON oficial CC0 (ya integrado). La lista nacional de la ANSR/SINCRO es solo PDF y su JSON tiene términos restrictivos: no se usa.
+  - Obras y cortes: Lisboa publica un CSV oficial CC-BY ("Condicionamentos de Trânsito", con geometría). Sirve para Lisboa; a nivel nacional **no hay feed abierto** (el punto de acceso de Infraestruturas de Portugal exige registro).
+  - Accidentes y policía en vivo: sin fuente legal nacional; solo los cubre la capa opcional de Waze (verificada en Lisboa).
+  - Resumen: en Portugal el núcleo legal da radares (nacional) y obras/cortes (Lisboa). Para accidentes/policía en vivo, la capa opcional de Waze es la única vía.
